@@ -1,0 +1,17 @@
+# Rust
+target/
+Cargo.lock
+
+# Node/Frontend (future)
+node_modules/
+pnpm-lock.yaml
+yarn.lock
+package-lock.json
+
+# IDE/OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+

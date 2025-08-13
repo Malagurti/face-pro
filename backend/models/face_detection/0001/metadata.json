@@ -1,0 +1,13 @@
+{
+  "name": "scrfd-0.5g",
+  "version": "0001",
+  "url": "https://example.com/models/scrfd_0.5g.onnx",
+  "sha256": "<to-fill>",
+  "inputs": [
+    { "name": "input.1", "shape": [1, 3, 640, 640], "layout": "NCHW", "mean": [0.5, 0.5, 0.5], "std": [0.5, 0.5, 0.5] }
+  ],
+  "license": ""
+  ,"accuracy": 0.92
+}
+
+

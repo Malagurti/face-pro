@@ -1,0 +1,142 @@
+{
+  "info": {
+    "name": "Face Pro - Backend",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_postman_id": "b7b1b2f8-2c4a-4a1b-9b8a-000000000001"
+  },
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/health",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "health"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Config",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/config",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "config"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Create Session",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/session",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "session"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Get Session",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/session/{{sessionId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "session",
+            "{{sessionId}}"
+          ]
+        }
+      }
+    },
+    {
+      "name": "WS Hello (docs)",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "exec": [
+              "// WebSocket example documented only (use a WS client):",
+              "// URL: ws://127.0.0.1:8080/ws",
+              "// First message:",
+              "// {",
+              "//   \"type\": \"hello\",",
+              "//   \"sessionId\": \"{{sessionId}}\",",
+              "//   \"token\": \"<token from create session>\",",
+              "//   \"client\": { \"sdkVersion\": \"0.1.0\", \"platform\": \"web\" }",
+              "// }",
+              "// Server replies helloAck then a Prompt (blink):",
+              "// { \"type\": \"prompt\", \"challenge\": { \"id\": \"c1\", \"kind\": \"blink\", \"timeoutMs\": 5000 } }",
+              "// Frame message example:",
+              "// { \"type\": \"frame\", \"ts\": 1733712345678, \"format\": \"jpeg\", \"data\": \"<base64>\", \"hints\": { \"roll\": 0, \"pitch\": 0, \"yaw\": 0 } }",
+              "// Throttle if >15 FPS:",
+              "// { \"type\": \"throttle\", \"reason\": \"fps-limit\", \"maxFps\": 15 }",
+              "// Frame Ack (RTT):",
+              "// { \"type\": \"frameAck\", \"ts\": 1733712345678, \"rttMs\": 42 }",
+              "// Telemetry example:",
+              "// { \"type\": \"telemetry\", \"fps\": 12.5, \"rttMs\": 40, \"camWidth\": 320, \"camHeight\": 240 }",
+              "// Feedback example:",
+              "// { \"type\": \"feedback\", \"status\": \"continue\" }",
+              "// Result example (server):",
+              "// { \"type\": \"result\", \"decision\": { \"passed\": true } }"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/ws",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "ws"
+          ]
+        },
+        "description": "WebSocket handshake, frames, telemetry and feedback example in the prerequest script."
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "sessionId",
+      "value": "00000000-0000-0000-0000-000000000000"
+    }
+  ]
+}
+
+

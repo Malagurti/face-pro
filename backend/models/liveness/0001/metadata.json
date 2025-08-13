@@ -1,0 +1,13 @@
+{
+  "name": "antispoof-lite",
+  "version": "0001",
+  "url": "",
+  "sha256": "",
+  "inputs": [
+    { "name": "input", "shape": [1, 3, 112, 112], "layout": "NCHW", "mean": [0.5, 0.5, 0.5], "std": [0.5, 0.5, 0.5] }
+  ],
+  "license": ""
+  ,"accuracy": 0.95
+}
+
+
