@@ -4,11 +4,13 @@ import { useProofOfLife, UseProofOfLifeOptions } from "./useProofOfLife";
 export type ProofOfLifeProps = UseProofOfLifeOptions & {
   onResult?: (passed: boolean) => void;
   onError?: (err: string) => void;
+  debug?: boolean;
 };
 
 export function ProofOfLife(props: ProofOfLifeProps) {
   const vidRef = useRef<HTMLVideoElement>(null);
   const { status, start, stop, lastPrompt, error, rttMs, throttled, targetFps, lastAckAt } = useProofOfLife(props);
+  const debug = props.debug ?? false;
 
   const ringColor = useMemo(() => {
     if (status === "passed") return "#10b981"; // green
@@ -45,8 +47,11 @@ export function ProofOfLife(props: ProofOfLifeProps) {
     if (!lastPrompt) return undefined;
     const map: Record<string, string> = {
       blink: "Piscar os olhos",
+      "open-mouth": "Abra a boca",
       "turn-left": "Vire a cabeça para a esquerda",
       "turn-right": "Vire a cabeça para a direita",
+      "head-up": "Levante a cabeça",
+      "head-down": "Abaixe a cabeça",
       smile: "Sorria",
     };
     return map[lastPrompt.kind] ?? lastPrompt.kind;
@@ -57,14 +62,14 @@ export function ProofOfLife(props: ProofOfLifeProps) {
       <div style={maskStyle}>
         <video ref={vidRef} data-proof-of-life autoPlay playsInline muted width={240} height={320} style={{ objectFit: "cover", width: "100%", height: "100%" }} />
       </div>
-      <div>status: {status} {throttled ? <span style={{ color: "#f59e0b" }}>(throttle)</span> : null}</div>
-      <div style={{ fontSize: 12, color: "#9ca3af" }}>targetFps: {targetFps}{rttMs !== undefined ? ` · rtt: ${rttMs}ms` : ""}{lastAckAt ? ` · last: ${new Date(lastAckAt).toLocaleTimeString()}` : ""}</div>
+      {debug && (<div>status: {status} {throttled ? <span style={{ color: "#f59e0b" }}>(throttle)</span> : null}</div>)}
+      {debug && (<div style={{ fontSize: 12, color: "#9ca3af" }}>targetFps: {targetFps}{rttMs !== undefined ? ` · rtt: ${rttMs}ms` : ""}{lastAckAt ? ` · last: ${new Date(lastAckAt).toLocaleTimeString()}` : ""}</div>)}
       {promptText && (
         <div style={{ fontSize: 14 }}>
           Guia: {promptText}
         </div>
       )}
-      {error && <div style={{ color: "red" }}>{error}</div>}
+      {debug && error && <div style={{ color: "red" }}>{error}</div>}
     </div>
   );
 }

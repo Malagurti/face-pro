@@ -54,6 +54,23 @@ pub struct TelemetryMessage {
     pub cam_width: Option<u32>,
     #[serde(default)]
     pub cam_height: Option<u32>,
+    #[serde(default)]
+    pub motion_score: Option<f32>,
+    #[serde(default)]
+    pub ahash: Option<String>,
+    #[serde(default)]
+    pub face_present: Option<bool>,
+    #[serde(default)]
+    pub face_box: Option<TelemetryFaceBox>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryFaceBox {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -132,8 +149,11 @@ pub struct PromptChallenge<'a> {
 #[serde(rename_all = "kebab-case")]
 pub enum ChallengeKind {
     Blink,
+    OpenMouth,
     TurnLeft,
     TurnRight,
+    HeadUp,
+    HeadDown,
 }
 
 #[derive(Debug, Serialize)]

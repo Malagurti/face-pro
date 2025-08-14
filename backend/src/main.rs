@@ -68,6 +68,8 @@ struct Session {
     fsm: SessionFsm,
     #[serde(skip_serializing)]
     pad_state: pad::PadState,
+    #[serde(skip_serializing)]
+    tele: TelemetryState,
 }
 #[derive(Clone, Default, Serialize)]
 struct SessionMetrics {
@@ -93,6 +95,27 @@ struct SessionFsm {
 
 impl SessionFsm {
     fn new() -> Self { Self { state: FsmState::Idle, completed: 0 } }
+}
+
+#[derive(Clone, Default, Serialize)]
+struct TelemetryState {
+    #[serde(skip_serializing)]
+    last_cx: Option<f32>,
+    #[serde(skip_serializing)]
+    last_w: Option<f32>,
+    turn_left_hits: u32,
+    turn_right_hits: u32,
+    motion_hits: u32,
+}
+
+impl TelemetryState {
+    fn reset(&mut self) {
+        self.turn_left_hits = 0;
+        self.turn_right_hits = 0;
+        self.motion_hits = 0;
+        self.last_cx = None;
+        self.last_w = None;
+    }
 }
 
 
@@ -186,6 +209,7 @@ async fn create_session(State(state): State<AppState>) -> impl IntoResponse {
         metrics: SessionMetrics::default(),
         fsm: SessionFsm::new(),
         pad_state: pad::PadState::default(),
+        tele: TelemetryState::default(),
     };
     {
         let mut sessions = state.sessions.write().await;
@@ -247,7 +271,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             let _ = socket.close().await;
             return;
         }
-        let ack = ServerMessage::HelloAck { challenges: &["blink", "turn-left", "turn-right"] };
+        let ack = ServerMessage::HelloAck { challenges: &["blink", "open-mouth", "turn-left", "turn-right", "head-up", "head-down"] };
         let payload = serde_json::to_string(&ack).unwrap();
         if socket.send(Message::Text(payload)).await.is_err() { return; }
     } else {
@@ -279,7 +303,69 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 if let Ok(msg) = serde_json::from_str::<ClientMessage>(&text) {
                     match msg {
                         ClientMessage::Hello { .. } => {}
-                        ClientMessage::Telemetry(_) => {}
+                        ClientMessage::Telemetry(tel) => {
+                            let mut done = false;
+                            let mut sessions = state.sessions.write().await;
+                            if let Some(s) = sessions.values_mut().next() {
+                                // Heurística de movimento
+                                if let Some(ms) = tel.motion_score { if ms >= 0.02 { s.tele.motion_hits = s.tele.motion_hits.saturating_add(1); } }
+                                // Heurística de turn usando deslocamento de bbox quando disponível
+                                if let Some(b) = tel.face_box.as_ref() {
+                                    let cx = b.x + b.width * 0.5;
+                                    if let Some(prev_cx) = s.tele.last_cx {
+                                        let dx = cx - prev_cx;
+                                        let wref = s.tele.last_w.unwrap_or(b.width.max(1.0));
+                                        let rel = dx / wref.max(1.0);
+                                        if rel <= -0.15 { s.tele.turn_left_hits = s.tele.turn_left_hits.saturating_add(1); }
+                                        if rel >= 0.15 { s.tele.turn_right_hits = s.tele.turn_right_hits.saturating_add(1); }
+                                    }
+                                    s.tele.last_cx = Some(cx);
+                                    s.tele.last_w = Some(b.width);
+                                }
+
+                                // FSM: validar automaticamente desafios simples quando recebemos sinais suficientes
+                                match &mut s.fsm.state {
+                                    FsmState::Prompting { challenge_id, kind } => {
+                                        let ok = match kind {
+                                            ChallengeKind::Blink => s.tele.motion_hits >= 2,
+                                            ChallengeKind::OpenMouth => s.tele.motion_hits >= 2,
+                                            ChallengeKind::TurnLeft => s.tele.turn_left_hits >= 2,
+                                            ChallengeKind::TurnRight => s.tele.turn_right_hits >= 2,
+                                            ChallengeKind::HeadUp => s.tele.motion_hits >= 2,
+                                            ChallengeKind::HeadDown => s.tele.motion_hits >= 2,
+                                        };
+                                        if ok {
+                                            s.fsm.completed += 1;
+                                            s.tele.reset();
+                                            if s.fsm.completed >= 3 {
+                                                s.fsm.state = FsmState::Passed;
+                                                done = true;
+                                            } else {
+                                                let next_kind = {
+                                                    use rand::seq::SliceRandom;
+                                                    use rand::thread_rng;
+                                                    let mut all = vec![ChallengeKind::Blink, ChallengeKind::OpenMouth, ChallengeKind::TurnLeft, ChallengeKind::TurnRight, ChallengeKind::HeadUp, ChallengeKind::HeadDown];
+                                                    all.retain(|k| k != kind);
+                                                    let mut rng = thread_rng();
+                                                    all.choose(&mut rng).cloned()
+                                                };
+                                                if let Some(nk) = next_kind {
+                                                    let next = ServerMessage::Prompt { challenge: protocol::PromptChallenge { id: "cX", kind: nk.clone(), timeout_ms: 5000 } };
+                                                    let _ = socket.send(Message::Text(serde_json::to_string(&next).unwrap())).await;
+                                                    *kind = nk;
+                                                    *challenge_id = "cX".to_string();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if done {
+                                let result = ServerMessage::Result { decision: protocol::Decision { passed: true, reason: None } };
+                                let _ = socket.send(Message::Text(serde_json::to_string(&result).unwrap())).await;
+                            }
+                        }
                         ClientMessage::Frame(frame) => {
                             let now = Instant::now();
                             if let Some(prev) = last_frame_at {
