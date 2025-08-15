@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "setup": "cd ../.. && pnpm setup",
+    "dev:full": "cd ../.. && pnpm dev:example",
+    "build:sdk": "cd ../../packages/proof-of-life && pnpm build"
   },
   "dependencies": {
     "react": "18.3.1",

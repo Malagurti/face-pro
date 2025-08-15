@@ -2,6 +2,14 @@
   "name": "face-pro-frontend",
   "private": true,
   "version": "0.0.0",
+  "scripts": {
+    "install": "pnpm install --recursive",
+    "build": "pnpm run --recursive build",
+    "build:sdk": "pnpm run -F @face-pro/proof-of-life build",
+    "dev:example": "pnpm run build:sdk && pnpm run -F face-pro-example dev",
+    "setup": "pnpm install && pnpm run build:sdk",
+    "clean": "pnpm run --recursive clean || echo 'No clean scripts found'"
+  },
   "devDependencies": {
     "typescript": "5.5.4",
     "eslint": "9.7.0",

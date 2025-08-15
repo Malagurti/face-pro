@@ -7,7 +7,10 @@
   "types": "dist/index.d.ts",
   "files": ["dist"],
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist || rmdir /s /q dist 2>nul || echo 'Nothing to clean'",
+    "rebuild": "pnpm clean && pnpm build",
+    "dev": "tsc -p tsconfig.json --watch"
   },
   "peerDependencies": {
     "react": ">=18",

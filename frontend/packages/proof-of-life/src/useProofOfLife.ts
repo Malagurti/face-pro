@@ -16,6 +16,8 @@ export interface UseProofOfLifeOptions {
   maxFaceAreaRatio?: number;
   centerTolerance?: number;
   detectionIntervalFrames?: number;
+  bypassValidation?: boolean;
+  onLog?: (level: 'info' | 'warn' | 'error', message: string, data?: any) => void;
 }
 
 export interface UseProofOfLifeResult {
@@ -34,7 +36,7 @@ export interface UseProofOfLifeResult {
 }
 
 export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResult {
-  const { backendUrl, sessionId, token, videoConstraints, maxFps = 15, enableClientHeuristics = true, minMotionScore = 0.02, phashIntervalFrames = 5, enablePositionGuide = true, minFaceAreaRatio = 0.12, maxFaceAreaRatio = 0.6, centerTolerance = 0.12, detectionIntervalFrames = 2 } = opts;
+  const { backendUrl, sessionId, token, videoConstraints, maxFps = 15, enableClientHeuristics = true, minMotionScore = 0.02, phashIntervalFrames = 5, enablePositionGuide = true, minFaceAreaRatio = 0.12, maxFaceAreaRatio = 0.6, centerTolerance = 0.12, detectionIntervalFrames = 2, bypassValidation = false, onLog } = opts;
   const [status, setStatus] = useState<Status>("idle");
   const [lastPrompt, setLastPrompt] = useState<UseProofOfLifeResult["lastPrompt"]>();
   const [error, setError] = useState<string | undefined>();
@@ -60,6 +62,18 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
   const challengeCountRef = useRef<number>(0);
 
   const wsUrl = useMemo(() => backendUrl.replace(/^http/, "ws") + "/ws", [backendUrl]);
+
+  const logRef = useRef(onLog);
+  logRef.current = onLog;
+
+  const log = useCallback((level: 'info' | 'warn' | 'error', message: string, data?: any) => {
+    if (logRef.current) {
+      logRef.current(level, message, data);
+    } else {
+      const logFn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
+      logFn(message, data || '');
+    }
+  }, []); // Dependências vazias para evitar recriação
 
   const send = useCallback((msg: unknown) => {
     const ws = wsRef.current;
@@ -111,6 +125,149 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const ctx = (canvas.getContext("2d", { willReadFrequently: true } as any) || canvas.getContext("2d")) as CanvasRenderingContext2D | null;
     if (!ctx) return;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    if (bypassValidation) {
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      
+      // Reduzir resolução para 160x120 para economizar largura de banda
+      const reducedCanvas = document.createElement('canvas');
+      reducedCanvas.width = 160;
+      reducedCanvas.height = 120;
+      const reducedCtx = reducedCanvas.getContext('2d');
+      if (reducedCtx) {
+        reducedCtx.drawImage(canvas, 0, 0, 160, 120);
+        var reducedImageData = reducedCtx.getImageData(0, 0, 160, 120);
+      } else {
+        var reducedImageData = imageData; // fallback
+      }
+      
+      const enhancedData = {
+        timestamp: now,
+        frameId: Date.now(),
+        videoInfo: {
+          width: canvas.width,
+          height: canvas.height,
+          videoWidth: video.videoWidth,
+          videoHeight: video.videoHeight
+        },
+        rawImageData: {
+          width: reducedImageData.width,
+          height: reducedImageData.height,
+          data: Array.from(reducedImageData.data)
+        },
+        motionScore: 0,
+        ahash: "",
+        features: {
+          brightness: 0,
+          contrast: 0,
+          sharpness: 0,
+          histogram: [] as number[],
+          edgeDetection: [] as number[],
+          colorChannels: {
+            red: 0,
+            green: 0,
+            blue: 0
+          }
+        },
+        frameSequence: frameCounterRef.current
+      };
+
+      const w = imageData.width, h = imageData.height;
+      const data = imageData.data;
+      
+      let totalBrightness = 0;
+      let totalRed = 0, totalGreen = 0, totalBlue = 0;
+      const histogram = new Array(256).fill(0);
+      const edgeData = [];
+      
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i] || 0;
+        const g = data[i + 1] || 0;
+        const b = data[i + 2] || 0;
+        const gray = Math.round(r * 0.299 + g * 0.587 + b * 0.114);
+        
+        totalBrightness += gray;
+        totalRed += r;
+        totalGreen += g;
+        totalBlue += b;
+        histogram[gray]++;
+        
+        // Detecção de bordas simples (Sobel aproximado)
+        if (i > w * 4 * 2 && i < data.length - w * 4 * 2) {
+          const pixelAbove = Math.round((data[i - w * 4] || 0) * 0.299 + (data[i - w * 4 + 1] || 0) * 0.587 + (data[i - w * 4 + 2] || 0) * 0.114);
+          const pixelBelow = Math.round((data[i + w * 4] || 0) * 0.299 + (data[i + w * 4 + 1] || 0) * 0.587 + (data[i + w * 4 + 2] || 0) * 0.114);
+          const edge = Math.abs(pixelAbove - pixelBelow);
+          if (edge > 30) edgeData.push(edge);
+        }
+      }
+      
+      const pixelCount = (data.length / 4);
+      enhancedData.features.brightness = totalBrightness / pixelCount;
+      enhancedData.features.histogram = histogram;
+      enhancedData.features.colorChannels = {
+        red: totalRed / pixelCount,
+        green: totalGreen / pixelCount,
+        blue: totalBlue / pixelCount
+      };
+      enhancedData.features.edgeDetection = edgeData.slice(0, 100); // Limitar para não sobrecarregar
+      
+      const stepX = Math.max(1, Math.floor(w / 32));
+      const stepY = Math.max(1, Math.floor(h / 32));
+      const small = new Uint8ClampedArray(32 * 32);
+      let p = 0;
+      for (let yy = 0; yy < 32; yy++) {
+        for (let xx = 0; xx < 32; xx++) {
+          const x = xx * stepX;
+          const y = yy * stepY;
+          const i = (y * w + x) * 4;
+          const r = data[i] || 0;
+          const gch = data[i + 1] || 0;
+          const b = data[i + 2] || 0;
+          const gray = (r * 0.299 + gch * 0.587 + b * 0.114) | 0;
+          small[p++] = gray as number;
+        }
+      }
+      
+      if (lastSmallGrayRef.current) {
+        const prev = lastSmallGrayRef.current;
+        const len = Math.min(prev.length, small.length);
+        let acc = 0;
+        for (let i = 0; i < len; i++) {
+          const pv = prev[i] || 0;
+          const sv = small[i] || 0;
+          acc += Math.abs(pv - sv) / 255;
+        }
+        enhancedData.motionScore = acc / len;
+      }
+      lastSmallGrayRef.current = small;
+      
+      enhancedData.ahash = computeAHash(data, w, h);
+      
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        const message = {
+          type: "bypassFrame",
+          ...enhancedData
+        };
+        ws.send(JSON.stringify(message));
+        // Log apenas a cada 30 frames para não sobrecarregar
+        if (frameCounterRef.current % 30 === 0) {
+          log('info', "🔄 [BYPASS] Dados enviados", {
+            type: message.type,
+            frameId: message.frameId,
+            frameSeq: message.frameSequence,
+            resolution: `${message.rawImageData.width}x${message.rawImageData.height}`,
+            dataSize: `${(message.rawImageData.data.length / 1024).toFixed(1)}KB`,
+            motionScore: message.motionScore.toFixed(4),
+            brightness: message.features.brightness.toFixed(2),
+            edges: message.features.edgeDetection.length,
+            colorAvg: `R:${message.features.colorChannels.red.toFixed(0)} G:${message.features.colorChannels.green.toFixed(0)} B:${message.features.colorChannels.blue.toFixed(0)}`,
+            ahash: message.ahash.substring(0, 8) + "..."
+          });
+        }
+      }
+      return;
+    }
     if (enableClientHeuristics) {
       const id = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const w = id.width, h = id.height;
@@ -257,7 +414,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
         reader.readAsArrayBuffer(blob);
       }, "image/jpeg", 0.7);
     }
-  }, [enableClientHeuristics, maxFps, minMotionScore, phashIntervalFrames, send, targetFps, detectionIntervalFrames]);
+  }, [enableClientHeuristics, maxFps, minMotionScore, phashIntervalFrames, send, targetFps, detectionIntervalFrames, bypassValidation]);
 
   const start = useCallback(async () => {
     setError(undefined);
@@ -277,41 +434,45 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
       mediaStreamRef.current = ms;
       const video = document.querySelector("video[data-proof-of-life]") as HTMLVideoElement | null;
       if (video) video.srcObject = ms;
-      try {
-        await (async () => {
-          const mod: any = await import("@mediapipe/tasks-vision");
-          const fileset = await mod.FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
-          mpVisionRef.current = mod;
-          
-          const modelPaths = [
-            "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite",
-            "https://storage.googleapis.com/mediapipe-assets/face_detection_short_range.tflite",
-            "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/models/face_detection_short_range.tflite"
-          ];
-          
-          let detector = null;
-          for (const modelPath of modelPaths) {
-            try {
-              detector = await mod.FaceDetector.createFromOptions(fileset, { 
-                baseOptions: { modelAssetPath: modelPath }, 
-                runningMode: "VIDEO" 
-              });
-              break;
-            } catch (e) {
-              console.warn(`Falha ao carregar modelo de ${modelPath}:`, e);
+      if (!bypassValidation) {
+        try {
+          await (async () => {
+            const mod: any = await import("@mediapipe/tasks-vision");
+            const fileset = await mod.FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+            mpVisionRef.current = mod;
+            
+            const modelPaths = [
+              "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite",
+              "https://storage.googleapis.com/mediapipe-assets/face_detection_short_range.tflite",
+              "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/models/face_detection_short_range.tflite"
+            ];
+            
+            let detector = null;
+            for (const modelPath of modelPaths) {
+              try {
+                detector = await mod.FaceDetector.createFromOptions(fileset, { 
+                  baseOptions: { modelAssetPath: modelPath }, 
+                  runningMode: "VIDEO" 
+                });
+                break;
+              } catch (e) {
+                console.warn(`Falha ao carregar modelo de ${modelPath}:`, e);
+              }
             }
-          }
-          
-          if (!detector) {
-            console.warn("❌ Nenhum modelo de detecção facial pôde ser carregado. Detecção facial será desabilitada.");
-          } else {
-            console.log("✅ MediaPipe detector carregado com sucesso!");
-          }
-          
-          mpDetectorRef.current = detector;
-        })();
-      } catch (e) {
-        console.warn("Erro ao inicializar MediaPipe:", e);
+            
+            if (!detector) {
+              console.warn("❌ Nenhum modelo de detecção facial pôde ser carregado. Detecção facial será desabilitada.");
+            } else {
+              console.log("✅ MediaPipe detector carregado com sucesso!");
+            }
+            
+            mpDetectorRef.current = detector;
+          })();
+        } catch (e) {
+          console.warn("Erro ao inicializar MediaPipe:", e);
+        }
+      } else {
+        log('info', "🔄 Modo bypass ativado - MediaPipe desabilitado");
       }
 
       preparingRef.current = true;
@@ -342,24 +503,24 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
           readyCountRef.current += 1;
         }
         
-        const requiredReadyFrames = mpDetectorRef.current ? 12 : 5; // Mais frames para estabilidade
-        if (readyCountRef.current % 10 === 0) {
-          console.log(`Ready count: ${readyCountRef.current}/${requiredReadyFrames}, detector: ${!!mpDetectorRef.current}, face: ${!!facePresent}`);
+        const requiredReadyFrames = bypassValidation ? 2 : (mpDetectorRef.current ? 12 : 5);
+        if (readyCountRef.current % 10 === 0 && readyCountRef.current < requiredReadyFrames * 2) {
+          log('info', `Ready count: ${readyCountRef.current}/${requiredReadyFrames}`, { detector: !!mpDetectorRef.current, face: !!facePresent, bypass: bypassValidation });
         }
         if (readyCountRef.current >= requiredReadyFrames && !wsRef.current) {
-          console.log(`Conectando ao WebSocket: ${wsUrl}`);
+          log('info', `Conectando ao WebSocket: ${wsUrl}`);
           const ws = new WebSocket(wsUrl);
           wsRef.current = ws;
           ws.onopen = () => {
-            console.log("WebSocket conectado, enviando hello");
-            ws.send(JSON.stringify({ type: "hello", sessionId, token, client: { sdkVersion: "0.0.2", platform: "web" } }));
+            log('info', "WebSocket conectado, enviando hello");
+            ws.send(JSON.stringify({ type: "hello", sessionId, token, client: { sdkVersion: "0.0.3", platform: "web", bypassValidation } }));
           };
           ws.onmessage = (ev) => {
             try {
               const msg = JSON.parse(ev.data);
-              console.log("Mensagem recebida do WebSocket:", JSON.stringify(msg, null, 2));
+              log('info', "Mensagem recebida do WebSocket", msg);
               if (msg.type === "helloAck") {
-                console.log("HelloAck recebido, iniciando streaming");
+                log('info', "HelloAck recebido, iniciando streaming");
                 setStatus("streaming");
                 preparingRef.current = false;
                 streamingRef.current = true;
@@ -371,8 +532,12 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
                 };
                 requestAnimationFrame(loop);
               } else if (msg.type === "prompt") {
+                if (bypassValidation) {
+                  log('info', "🔄 [BYPASS] Ignorando prompt - modo bypass ativo", msg.challenge?.kind);
+                  return;
+                }
                 challengeCountRef.current += 1;
-                console.log(`🎯 Desafio ${challengeCountRef.current} recebido:`, {
+                log('info', `🎯 Desafio ${challengeCountRef.current} recebido`, {
                   id: msg.challenge?.id,
                   kind: msg.challenge?.kind,
                   timeout: msg.challenge?.timeoutMs
@@ -395,10 +560,10 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
                 }
                 setLastAckAt(Date.now());
                 if (msg.face || msg.pad) {
-                  console.log("FrameAck com dados adicionais:", { face: msg.face, pad: msg.pad });
+                  log('info', "FrameAck com dados adicionais", { face: msg.face, pad: msg.pad });
                 }
               } else if (msg.type === "result") {
-                console.log("Resultado recebido:", msg.decision);
+                log('info', "Resultado recebido", msg.decision);
                 setStatus(msg.decision?.passed ? "passed" : "failed");
                 setLastPrompt(undefined); // Limpar prompt quando finalizar
                 streamingRef.current = false;
@@ -406,14 +571,20 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
             } catch {}
           };
           ws.onerror = (error) => {
-            console.error("Erro no WebSocket:", error);
+            log('error', "Erro no WebSocket", error);
             setError("ws-error");
           };
           ws.onclose = (event) => {
-            console.log("WebSocket fechado:", event.code, event.reason);
+            log('info', `WebSocket fechado: ${event.code}`, event.reason);
           };
         }
-        requestAnimationFrame(prepareLoop);
+        
+        // Parar o loop se WebSocket já foi criado ou se passou muito do limite
+        if (!wsRef.current && readyCountRef.current < requiredReadyFrames * 10) {
+          requestAnimationFrame(prepareLoop);
+        } else if (wsRef.current) {
+          preparingRef.current = false;
+        }
       };
       requestAnimationFrame(prepareLoop);
     } catch (e: any) {
@@ -423,7 +594,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
       streamingRef.current = false;
       return;
     }
-  }, [wsUrl, send, sessionId, token, videoConstraints, captureAndSendFrame]);
+  }, [wsUrl, send, sessionId, token, videoConstraints, captureAndSendFrame, bypassValidation]);
 
   const stop = useCallback(async () => {
     wsRef.current?.close();

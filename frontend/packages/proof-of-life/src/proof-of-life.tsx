@@ -19,7 +19,7 @@ export type ProofOfLifeProps = UseProofOfLifeOptions & {
   debug?: boolean;
 };
 
-export function ProofOfLife(props: ProofOfLifeProps) {
+export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifeProps) {
   const vidRef = useRef<HTMLVideoElement>(null);
   const { status, start, stop, lastPrompt, error, rttMs, throttled, targetFps, lastAckAt, faceBox, guide } = useProofOfLife(props);
   const debug = props.debug ?? false;
@@ -41,12 +41,12 @@ export function ProofOfLife(props: ProofOfLifeProps) {
 
   useEffect(() => {
     if (error && props.onError) props.onError(error);
-  }, [error, props]);
+  }, [error, props.onError]);
 
   useEffect(() => {
     if (status === "passed" && props.onResult) props.onResult(true);
     if (status === "failed" && props.onResult) props.onResult(false);
-  }, [status, props]);
+  }, [status, props.onResult]);
 
   const maskStyle: React.CSSProperties = {
     position: "relative",
@@ -83,7 +83,31 @@ export function ProofOfLife(props: ProofOfLifeProps) {
       </div>
       {debug && (<div>status: {status} {throttled ? <span style={{ color: "#f59e0b" }}>(throttle)</span> : null}</div>)}
       {debug && (<div style={{ fontSize: 12, color: "#9ca3af" }}>targetFps: {targetFps}{rttMs !== undefined ? ` · rtt: ${rttMs}ms` : ""}{lastAckAt ? ` · last: ${new Date(lastAckAt).toLocaleTimeString()}` : ""}</div>)}
-      {promptText && status !== "passed" && status !== "failed" && (
+      {props.bypassValidation && status === "streaming" && (
+        <div style={{ 
+          fontSize: 16, 
+          fontWeight: "bold", 
+          padding: "12px",
+          backgroundColor: "rgba(139, 69, 19, 0.8)",
+          color: "white",
+          borderRadius: "12px",
+          textAlign: "center",
+          margin: "10px 0",
+          boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+          border: "2px solid #f59e0b"
+        }}>
+          🔄 Modo Bypass Ativo
+          <div style={{ 
+            fontSize: 12, 
+            marginTop: "6px", 
+            opacity: 0.8,
+            color: "#fbbf24"
+          }}>
+            Capturando dados para o backend processar
+          </div>
+        </div>
+      )}
+      {promptText && status !== "passed" && status !== "failed" && !props.bypassValidation && (
         <div style={{ 
           fontSize: 16, 
           fontWeight: "bold", 
@@ -120,6 +144,6 @@ export function ProofOfLife(props: ProofOfLifeProps) {
       {debug && error && <div style={{ color: "red" }}>{error}</div>}
     </div>
   );
-}
+});
 
 

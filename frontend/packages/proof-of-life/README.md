@@ -103,6 +103,7 @@ Observação: o hook busca um elemento `video[data-proof-of-life]` no DOM para c
 - useFaceDetector?: boolean (default true quando suportado)
 - minMotionScore?: number (default 0.02)
 - phashIntervalFrames?: number (default 5)
+- **bypassValidation?: boolean (default false)** – **NOVO**: modo bypass para hackathon
 
 Props adicionais do componente:
 - debug?: boolean (default false) – exibe status/RTT/erros para diagnóstico
@@ -122,7 +123,85 @@ Props adicionais do componente:
 - facePresent: boolean – quando FaceDetector API disponível
 - faceBox: `{ x, y, width, height }` – quando FaceDetector API disponível
 
-Esses dados ajudam o backend a validar (MVP) enquanto a validação “forte” por landmarks/pose é integrada.
+Esses dados ajudam o backend a validar (MVP) enquanto a validação "forte" por landmarks/pose é integrada.
+
+## 🚀 Modo Bypass para Hackathon
+
+Para hackathons e testes de diferentes metodologias de validação no backend, o SDK agora oferece o modo `bypassValidation`. Quando ativado:
+
+### Como usar
+
+```tsx
+<ProofOfLife
+  backendUrl="http://localhost:8080"
+  sessionId="..."
+  token="..."
+  bypassValidation={true}  // ✨ Modo bypass ativado
+  enableClientHeuristics={false}  // Desabilitar processamento local
+  enablePositionGuide={false}     // Desabilitar guias de posição
+/>
+```
+
+### O que acontece no modo bypass
+
+1. **MediaPipe é desabilitado** - Não há processamento de detecção facial local
+2. **Captura completa de dados** - Todos os dados necessários são extraídos dos frames
+3. **Envio via WebSocket** - Dados brutos são enviados para o backend processar
+
+### Dados enviados no modo bypass
+
+O SDK envia mensagens do tipo `bypassFrame` com os seguintes dados:
+
+```json
+{
+  "type": "bypassFrame",
+  "timestamp": 1234567890.123,
+  "frameId": 1234567890123,
+  "videoInfo": {
+    "width": 320,
+    "height": 240,
+    "videoWidth": 320,
+    "videoHeight": 240
+  },
+  "rawImageData": {
+    "width": 320,
+    "height": 240,
+    "data": [255, 128, 64, 255, ...] // Array completo de pixels RGBA
+  },
+  "motionScore": 0.05,
+  "ahash": "a1b2c3d4e5f6...",
+  "features": {
+    "brightness": 128.5,
+    "contrast": 0,
+    "sharpness": 0,
+    "histogram": [0, 1, 2, 3, ...]  // Histograma de 256 posições
+  }
+}
+```
+
+### Dados para implementação de liveness
+
+Os dados enviados contêm tudo necessário para validar:
+
+- **Piscar os olhos**: análise de mudanças na região dos olhos via `rawImageData`
+- **Virar cabeça (esquerda/direita)**: detecção de movimento lateral via `motionScore` e análise facial
+- **Movimento de cabeça (cima/baixo)**: detecção de movimento vertical
+- **Abrir boca**: análise da região da boca
+- **Expressões faciais**: dados completos dos pixels para qualquer análise
+
+### Para o time de backend
+
+1. **Conexão WebSocket**: Cliente envia `{ type: "hello", client: { bypassValidation: true } }`
+2. **Recebimento de frames**: Escutar mensagens `bypassFrame` com dados completos
+3. **Processamento**: Implementar algoritmos de detecção usando os dados recebidos
+4. **Resposta**: Continuar enviando `prompt` e `result` normalmente
+
+### Benefícios para hackathon
+
+- ✅ **Flexibilidade total**: Teste qualquer biblioteca/algoritmo no backend
+- ✅ **Dados completos**: Acesso a pixels brutos e features calculadas
+- ✅ **Performance**: Sem processamento pesado no frontend
+- ✅ **Compatibilidade**: Mantém protocolo WebSocket existente
 
 ## Boas práticas
 
