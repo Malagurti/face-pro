@@ -71,7 +71,8 @@ const ProgressRing: React.FC<ProgressRingProps> = ({ progress, color, size, stro
 
 export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifeProps) {
   const vidRef = useRef<HTMLVideoElement>(null);
-  const { status, start, stop, lastPrompt, error, rttMs, throttled, targetFps, lastAckAt, faceBox, currentChallenge, challengeCompleted, standaloneMode, challengeStartTime } = useProofOfLife(props);
+  const componentMountedRef = useRef(false);
+  const { status, start, stop, lastPrompt, error, rttMs, throttled, targetFps, lastAckAt, faceBox, currentChallenge, challengeCompleted, standaloneMode, challengeStartTime, challengeState, totalChallenges, maxChallenges } = useProofOfLife(props);
   const debug = props.debug ?? false;
 
   const ringColor = useMemo(() => {
@@ -84,27 +85,62 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
   }, [status, currentChallenge, challengeCompleted]);
 
   const progress = useMemo(() => {
-    if (status === "passed") return 100;
+    if (status === "passed" || challengeState === 'completed') return 100;
     if (status === "failed") return 0;
     if (status === "connecting") return 20;
-    if (status === "streaming" && !currentChallenge) return 60;
-    if (currentChallenge && !challengeCompleted) {
-      // Progresso baseado no tempo do desafio (10 segundos máximo)
+    if (status === "streaming" && challengeState === 'idle' && !currentChallenge) return 40;
+    
+    // Progresso baseado nos desafios completados
+    const baseProgress = totalChallenges && maxChallenges ? (totalChallenges / maxChallenges) * 80 : 40;
+    
+    if (challengeState === 'active' && currentChallenge && !challengeCompleted) {
+      // Progresso do desafio atual baseado no tempo (15 segundos máximo)
       if (challengeStartTime) {
         const elapsed = Date.now() - challengeStartTime;
-        const timeProgress = Math.min(elapsed / 10000, 1) * 25; // 25% do progresso baseado no tempo
-        return 75 + timeProgress;
+        const timeProgress = Math.min(elapsed / 15000, 1) * 15; // 15% adicional baseado no tempo
+        return baseProgress + timeProgress;
       }
-      return 75;
+      return baseProgress;
     }
-    if (currentChallenge && challengeCompleted) return 100;
-    return 0;
-  }, [status, currentChallenge, challengeCompleted, challengeStartTime]);
+    
+    if (challengeState === 'transitioning' || (currentChallenge && challengeCompleted)) {
+      return baseProgress + 15; // Bônus por completar o desafio
+    }
+    
+    return baseProgress;
+  }, [status, challengeState, currentChallenge, challengeCompleted, challengeStartTime, totalChallenges, maxChallenges]);
 
   useEffect(() => {
-    start();
-    return () => { stop(); };
-  }, [start, stop]);
+    if (componentMountedRef.current) {
+      console.log('⚠️ ProofOfLife já foi montado - ignorando re-mount');
+      return;
+    }
+    
+    componentMountedRef.current = true;
+    console.log('🎬 ProofOfLife montando pela primeira vez...');
+    
+    let isMounted = true;
+    
+    const initializeComponent = async () => {
+      if (isMounted) {
+        try {
+          await start();
+          console.log('✅ ProofOfLife iniciado com sucesso');
+        } catch (error) {
+          console.error('❌ Erro ao iniciar ProofOfLife:', error);
+        }
+      }
+    };
+    
+    initializeComponent();
+    
+    return () => {
+      isMounted = false;
+      componentMountedRef.current = false;
+      console.log('🛑 ProofOfLife desmontando - cleanup completo');
+      stop();
+    };
+  }, []); // Array vazio para executar apenas uma vez
 
   useEffect(() => {
     if (error && props.onError) props.onError(error);
@@ -165,7 +201,7 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
       </div>
       {debug && (<div>status: {status} {throttled ? <span style={{ color: "#f59e0b" }}>(throttle)</span> : null}</div>)}
       {debug && (<div style={{ fontSize: 12, color: "#9ca3af" }}>targetFps: {targetFps}{rttMs !== undefined ? ` · rtt: ${rttMs}ms` : ""}{lastAckAt ? ` · last: ${new Date(lastAckAt).toLocaleTimeString()}` : ""}</div>)}
-      {debug && (<div style={{ fontSize: 12, color: "#9ca3af" }}>challenge: {currentChallenge?.type || 'none'} · completed: {challengeCompleted ? 'yes' : 'no'} · bypass: {props.bypassValidation ? 'yes' : 'no'} · standalone: {standaloneMode ? 'yes' : 'no'}</div>)}
+      {debug && (<div style={{ fontSize: 12, color: "#9ca3af" }}>challenge: {currentChallenge?.type || 'none'} · state: {challengeState || 'idle'} · progress: {totalChallenges || 0}/{maxChallenges || 3} · completed: {challengeCompleted ? 'yes' : 'no'} · bypass: {props.bypassValidation ? 'yes' : 'no'} · standalone: {standaloneMode ? 'yes' : 'no'}</div>)}
       {props.bypassValidation && status === "streaming" && (
         <div style={{ 
           fontSize: 16, 
@@ -210,7 +246,7 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
             opacity: 0.8,
             color: "#93c5fd"
           }}>
-            Testando detecção de gestos com MediaPipe
+            Progresso: {totalChallenges || 0}/{maxChallenges || 3} desafios
           </div>
         </div>
       )}
@@ -219,22 +255,22 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
           fontSize: 16, 
           fontWeight: "bold", 
           padding: "12px",
-          backgroundColor: challengeCompleted ? "rgba(16, 185, 129, 0.8)" : "rgba(0,0,0,0.8)",
+          backgroundColor: challengeCompleted ? "rgba(16, 185, 129, 0.8)" : challengeState === 'transitioning' ? "rgba(245, 158, 11, 0.8)" : "rgba(0,0,0,0.8)",
           color: "white",
           borderRadius: "12px",
           textAlign: "center",
           margin: "10px 0",
           boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
-          border: challengeCompleted ? "2px solid #10b981" : "2px solid #3b82f6"
+          border: challengeCompleted ? "2px solid #10b981" : challengeState === 'transitioning' ? "2px solid #f59e0b" : "2px solid #3b82f6"
         }}>
-          {challengeCompleted ? "✅ Desafio Completado!" : `🎯 ${getInstructionText(currentChallenge.type)}`}
+          {challengeCompleted ? "✅ Desafio Completado!" : challengeState === 'transitioning' ? "🔄 Preparando próximo..." : `🎯 ${getInstructionText(currentChallenge.type)}`}
           <div style={{ 
             fontSize: 12, 
             marginTop: "6px", 
             opacity: 0.8,
-            color: challengeCompleted ? "#6ee7b7" : "#93c5fd"
+            color: challengeCompleted ? "#6ee7b7" : challengeState === 'transitioning' ? "#fbbf24" : "#93c5fd"
           }}>
-            {challengeCompleted ? "Aguarde o próximo desafio..." : "Execute o movimento solicitado"}
+            {challengeCompleted ? `Desafio ${totalChallenges || 0}/${maxChallenges || 3} completo` : challengeState === 'transitioning' ? "Aguarde..." : "Execute o movimento solicitado"}
           </div>
         </div>
       )}
@@ -251,6 +287,14 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
       {debug && error && <div style={{ color: "red" }}>{error}</div>}
     </div>
   );
+}, (prevProps, nextProps) => {
+  // Comparação customizada para evitar re-renders desnecessários
+  const propsToCompare = [
+    'backendUrl', 'sessionId', 'token', 'enableLivenessChallenge', 
+    'bypassValidation', 'debug', 'maxFps', 'enableClientHeuristics'
+  ] as const;
+  
+  return propsToCompare.every(key => prevProps[key] === nextProps[key]);
 });
 
 

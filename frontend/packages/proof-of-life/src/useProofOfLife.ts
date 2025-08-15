@@ -33,6 +33,9 @@ export interface UseProofOfLifeResult {
   challengeCompleted?: boolean;
   standaloneMode?: boolean;
   challengeStartTime?: number;
+  challengeState?: 'idle' | 'active' | 'completed' | 'transitioning';
+  totalChallenges?: number;
+  maxChallenges?: number;
 }
 
 export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResult {
@@ -66,6 +69,12 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
   const challengeTimeoutRef = useRef<number | null>(null);
   const challengeCountRef = useRef<number>(0);
   const landmarksRef = useRef<any>(null);
+  const [challengeState, setChallengeState] = useState<'idle' | 'active' | 'completed' | 'transitioning'>('idle');
+  const [totalChallenges, setTotalChallenges] = useState<number>(0);
+  const maxChallenges = 3;
+  const challengeQueue = useRef<Array<'look_right' | 'look_left' | 'look_up' | 'open_mouth'>>([]);
+  const initializationRef = useRef<boolean>(false);
+  const standaloneInitialized = useRef<boolean>(false);
 
   const wsUrl = useMemo(() => backendUrl.replace(/^http/, "ws") + "/ws", [backendUrl]);
 
@@ -163,65 +172,136 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     }
   }, []);
 
-  // Sistema de desafios aleatórios para demonstração
-  const generateRandomChallenge = useCallback(() => {
-    const challenges: Array<'look_right' | 'look_left' | 'look_up' | 'open_mouth'> = ['look_right', 'look_left', 'look_up', 'open_mouth'];
-    const randomType = challenges[Math.floor(Math.random() * challenges.length)] as 'look_right' | 'look_left' | 'look_up' | 'open_mouth';
+  // Sistema de desafios controlados sequencialmente
+  const generateChallengeQueueRef = useRef(() => {
+    const allChallenges: Array<'look_right' | 'look_left' | 'look_up' | 'open_mouth'> = ['look_right', 'look_left', 'look_up', 'open_mouth'];
+    const shuffled = [...allChallenges].sort(() => Math.random() - 0.5);
+    challengeQueue.current = shuffled.slice(0, maxChallenges);
+    log('info', `🎯 Fila de ${maxChallenges} desafios gerada:`, challengeQueue.current);
+  });
+
+  const generateChallengeQueue = useCallback(() => {
+    generateChallengeQueueRef.current();
+  }, []);
+
+  const startNextChallengeRef = useRef<() => void>();
+  
+  startNextChallengeRef.current = () => {
+    if (challengeState !== 'idle' && challengeState !== 'transitioning') {
+      log('warn', '⚠️ Tentativa de iniciar desafio com estado inválido:', challengeState);
+      return;
+    }
+
+    if (totalChallenges >= maxChallenges) {
+      log('info', '🏁 Todos os desafios foram completados!');
+      setChallengeState('completed');
+      setStatus('passed');
+      return;
+    }
+
+    if (challengeQueue.current.length === 0) {
+      generateChallengeQueueRef.current();
+    }
+
+    const nextChallengeType = challengeQueue.current.shift();
+    if (!nextChallengeType) {
+      log('error', '❌ Erro: fila de desafios vazia');
+      return;
+    }
+
     const challengeId = `challenge_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
     const newChallenge = {
-      type: randomType,
+      type: nextChallengeType,
       id: challengeId
     };
     
     setCurrentChallenge(newChallenge);
     setChallengeCompleted(false);
+    setChallengeState('active');
     setChallengeStartTime(Date.now());
-    log('info', `🎯 Novo desafio gerado: ${randomType}`, { id: challengeId });
+    setTotalChallenges(prev => prev + 1);
     
-    // Timeout de 10 segundos para o desafio
+    log('info', `🎯 Desafio ${totalChallenges + 1}/${maxChallenges}: ${nextChallengeType}`, { id: challengeId });
+    
+    // Timeout de 15 segundos para o desafio
     if (challengeTimeoutRef.current) {
       clearTimeout(challengeTimeoutRef.current);
     }
     
     challengeTimeoutRef.current = window.setTimeout(() => {
-      log('warn', `⏰ Desafio ${randomType} expirou sem ser completado`);
-      generateRandomChallenge(); // Gerar próximo desafio
-    }, 10000);
+      log('warn', `⏰ Desafio ${nextChallengeType} expirou - próximo desafio`);
+      setChallengeState('transitioning');
+      setTimeout(() => startNextChallengeRef.current?.(), 1000);
+    }, 15000);
+  };
+
+  const startNextChallenge = useCallback(() => {
+    startNextChallengeRef.current?.();
+  }, []);
+
+  const completeCurrentChallengeRef = useRef<() => void>();
+  
+  completeCurrentChallengeRef.current = () => {
+    if (!currentChallenge || challengeCompleted || challengeState !== 'active') {
+      return;
+    }
+
+    setChallengeCompleted(true);
+    setChallengeState('transitioning');
+    const completionTime = Date.now() - challengeStartTime;
     
-    return newChallenge;
-  }, [log]);
+    log('info', `✅ Desafio ${currentChallenge.type} completado em ${completionTime}ms! (${totalChallenges}/${maxChallenges})`);
+    
+    // Limpar timeout do desafio atual
+    if (challengeTimeoutRef.current) {
+      clearTimeout(challengeTimeoutRef.current);
+      challengeTimeoutRef.current = null;
+    }
+    
+    // Enviar resultado para o backend (se conectado)
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: "challengeResponse",
+        challengeId: currentChallenge.id,
+        completed: true,
+        completionTime,
+        timestamp: Date.now()
+      }));
+    }
+    
+    // Aguardar 2 segundos antes do próximo desafio
+    setTimeout(() => {
+      setChallengeState('idle');
+      startNextChallengeRef.current?.();
+    }, 2000);
+  };
+
+  const completeCurrentChallenge = useCallback(() => {
+    completeCurrentChallengeRef.current?.();
+  }, []);
 
   // Função para iniciar modo standalone (sem backend)
   const startStandaloneMode = useCallback(() => {
+    if (standaloneInitialized.current) {
+      log('warn', '⚠️ Modo standalone já foi inicializado');
+      return;
+    }
+    
+    standaloneInitialized.current = true;
     setStandaloneMode(true);
     setStatus("streaming");
-    log('info', '🚀 Modo standalone iniciado - desafios serão gerados automaticamente');
+    setChallengeState('idle');
+    setTotalChallenges(0);
+    log('info', `🚀 Modo standalone iniciado - ${maxChallenges} desafios serão gerados sequencialmente`);
     
-    // Gerar primeiro desafio imediatamente para teste
+    // Gerar fila de desafios e iniciar primeiro após 2 segundos
     if (enableLivenessChallenge) {
+      generateChallengeQueueRef.current();
       setTimeout(() => {
-        generateRandomChallenge();
-      }, 1000);
-      
-      // Simular completar desafios a cada 5 segundos para demonstração
-      let challengeCounter = 0;
-      const demoInterval = setInterval(() => {
-        challengeCounter++;
-        if (challengeCounter <= 4) { // Apenas 4 demonstrações
-          log('info', `🎯 [DEMO] Simulando conclusão do desafio ${challengeCounter}`);
-          setChallengeCompleted(true);
-          
-          setTimeout(() => {
-            generateRandomChallenge();
-          }, 2000);
-        } else {
-          clearInterval(demoInterval);
-          log('info', '🎯 [DEMO] Demonstração concluída');
-        }
-      }, 5000);
+        startNextChallengeRef.current?.();
+      }, 2000);
     }
-  }, [enableLivenessChallenge, generateRandomChallenge, log]); // Dependências vazias para evitar recriação
+  }, [enableLivenessChallenge, maxChallenges, log]);
 
   const send = useCallback((msg: unknown) => {
     const ws = wsRef.current;
@@ -486,37 +566,10 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
                 landmarksRef.current = landmarks;
                 
                 // Analisar gestos se há desafio ativo
-                if (currentChallenge && enableLivenessChallenge) {
+                if (currentChallenge && enableLivenessChallenge && challengeState === 'active') {
                   const gestureDetected = analyzeGesture(landmarks);
                   if (gestureDetected && !challengeCompleted) {
-                    setChallengeCompleted(true);
-                    const completionTime = Date.now() - challengeStartTime;
-                    log('info', `🎯 Desafio ${currentChallenge.type} completado em ${completionTime}ms!`);
-                    
-                    // Limpar timeout do desafio atual
-                    if (challengeTimeoutRef.current) {
-                      clearTimeout(challengeTimeoutRef.current);
-                      challengeTimeoutRef.current = null;
-                    }
-                    
-                    // Enviar resultado para o backend (se conectado)
-                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                      wsRef.current.send(JSON.stringify({
-                        type: "challengeResponse",
-                        challengeId: currentChallenge.id,
-                        completed: true,
-                        completionTime,
-                        timestamp: now
-                      }));
-                    }
-                    
-                    // Gerar próximo desafio após 3 segundos
-                    setTimeout(() => {
-                      log('info', '🎯 Gerando próximo desafio...');
-                      if (standaloneMode || (wsRef.current && wsRef.current.readyState === WebSocket.OPEN)) {
-                        generateRandomChallenge();
-                      }
-                    }, 3000);
+                    completeCurrentChallenge();
                   }
                 }
               }
@@ -581,19 +634,26 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
         reader.readAsArrayBuffer(blob);
       }, "image/jpeg", 0.7);
     }
-  }, [enableClientHeuristics, maxFps, minMotionScore, phashIntervalFrames, send, targetFps, detectionIntervalFrames, bypassValidation, enableLivenessChallenge, currentChallenge, challengeCompleted, analyzeGesture, log, generateRandomChallenge, challengeStartTime, standaloneMode]);
+  }, [enableClientHeuristics, maxFps, minMotionScore, phashIntervalFrames, send, targetFps, detectionIntervalFrames, bypassValidation, enableLivenessChallenge, analyzeGesture, log, standaloneMode]);
 
   const start = useCallback(async () => {
-    setError(undefined);
-    setStatus("connecting");
+    if (initializationRef.current) {
+      log('warn', '⚠️ Sistema já foi inicializado - ignorando nova tentativa');
+      return;
+    }
     
-    log('info', '🚀 Iniciando sistema', { 
+    log('info', '🚀 Iniciando sistema - primeira vez', { 
       sessionId: sessionId || 'vazio', 
       token: token || 'vazio',
       backendUrl: backendUrl || 'vazio',
       enableLivenessChallenge,
-      bypassValidation 
+      bypassValidation,
+      timestamp: new Date().toISOString()
     });
+    
+    initializationRef.current = true;
+    setError(undefined);
+    setStatus("connecting");
 
     try {
       const defaultConstraints: MediaStreamConstraints = {
@@ -701,10 +761,19 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
             });
             
             if (detector && landmarker && enableLivenessChallenge && hasNoBackend) {
-              log('info', '🎯 Iniciando modo standalone - sem backend configurado');
-              setTimeout(() => {
-                startStandaloneMode();
-              }, 500);
+              log('info', '🎯 Iniciando modo standalone - sem backend configurado', {
+                detector: !!detector,
+                landmarker: !!landmarker,
+                enableLivenessChallenge,
+                hasNoBackend,
+                standaloneInitialized: standaloneInitialized.current
+              });
+              
+              if (!standaloneInitialized.current) {
+                setTimeout(() => {
+                  startStandaloneMode();
+                }, 500);
+              }
               return; // Não executar o resto da lógica de preparação
             }
           })();
@@ -713,7 +782,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
           
           // Fallback: se MediaPipe falhar e não tem backend, iniciar modo standalone mesmo assim
           const hasNoBackend = !sessionId || sessionId === "" || !token || token === "";
-          if (enableLivenessChallenge && hasNoBackend) {
+          if (enableLivenessChallenge && hasNoBackend && !standaloneInitialized.current) {
             log('info', '🎯 MediaPipe falhou, mas iniciando modo standalone para demonstração');
             setTimeout(() => {
               startStandaloneMode();
@@ -726,7 +795,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
         
         // Se está em bypass e não tem backend, ainda pode fazer demonstração
         const hasNoBackend = !sessionId || sessionId === "" || !token || token === "";
-        if (enableLivenessChallenge && hasNoBackend) {
+        if (enableLivenessChallenge && hasNoBackend && !standaloneInitialized.current) {
           log('info', '🎯 Modo bypass + standalone - iniciando demonstração');
           setTimeout(() => {
             startStandaloneMode();
@@ -790,8 +859,10 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
                       streaming: streamingRef.current, 
                       currentChallenge: !!currentChallenge 
                     });
-                    if (streamingRef.current && !currentChallenge) {
-                      generateRandomChallenge();
+                    if (streamingRef.current && !currentChallenge && challengeState === 'idle') {
+                      generateChallengeQueueRef.current();
+                      setTotalChallenges(0);
+                      startNextChallengeRef.current?.();
                     }
                   }, 2000);
                 }
@@ -866,17 +937,56 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
       streamingRef.current = false;
       return;
     }
-  }, [wsUrl, send, sessionId, token, videoConstraints, captureAndSendFrame, bypassValidation, enableLivenessChallenge, currentChallenge, generateRandomChallenge, startStandaloneMode]);
+  }, [wsUrl, send, sessionId, token, videoConstraints, captureAndSendFrame, bypassValidation, enableLivenessChallenge, startStandaloneMode]);
 
   const stop = useCallback(async () => {
-    wsRef.current?.close();
-    wsRef.current = null;
-    mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
-    mediaStreamRef.current = null;
+    log('info', '🛑 Parando sistema completamente');
+    
+    // Reset de flags
+    initializationRef.current = false;
+    standaloneInitialized.current = false;
+    preparingRef.current = false;
+    streamingRef.current = false;
+    
+    // Limpar timeouts
+    if (challengeTimeoutRef.current) {
+      clearTimeout(challengeTimeoutRef.current);
+      challengeTimeoutRef.current = null;
+    }
+    
+    // Fechar conexões
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    
+    // Parar camera
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((t) => {
+        t.stop();
+        log('info', '📹 Track da câmera parado:', t.kind);
+      });
+      mediaStreamRef.current = null;
+    }
+    
+    // Reset de estados
     setStatus("idle");
-  }, []);
+    setChallengeState('idle');
+    setCurrentChallenge(undefined);
+    setChallengeCompleted(false);
+    setTotalChallenges(0);
+    setStandaloneMode(false);
+    setFacePresent(undefined);
+    setFaceBox(undefined);
+    
+    // Limpar refs
+    challengeQueue.current = [];
+    landmarksRef.current = null;
+    
+    log('info', '✅ Sistema parado completamente');
+  }, [log]);
 
-  return { status, start, stop, lastPrompt, error, rttMs, targetFps, throttled, lastAckAt, facePresent, faceBox, currentChallenge, challengeCompleted, standaloneMode, challengeStartTime };
+  return { status, start, stop, lastPrompt, error, rttMs, targetFps, throttled, lastAckAt, facePresent, faceBox, currentChallenge, challengeCompleted, standaloneMode, challengeStartTime, challengeState, totalChallenges, maxChallenges };
 }
 
 
