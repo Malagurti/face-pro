@@ -109,6 +109,8 @@ pub enum ServerMessage<'a> {
         challenge: PromptChallenge<'a>,
     },
     Result {
+        #[serde(rename = "attemptId")]
+        attempt_id: &'a str,
         decision: Decision,
     },
     FrameAck {
@@ -121,6 +123,9 @@ pub enum ServerMessage<'a> {
         pad: Option<PadDebug>,
     },
     ChallengeResult {
+        #[serde(rename = "attemptId")]
+        attempt_id: String,
+        #[serde(rename = "challengeId")]
         challenge_id: String,
         decision: Decision,
         analysis: ChallengeAnalysis,
@@ -151,6 +156,7 @@ pub struct PromptChallenge<'a> {
     pub id: &'a str,
     pub kind: ChallengeKind,
     pub timeout_ms: u32,
+    pub attempt_id: &'a str,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -176,6 +182,7 @@ pub struct Decision {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChallengeStartMessage {
+    pub attempt_id: String,
     pub challenge_id: String,
     pub challenge_type: String,
     pub start_time: u64,
@@ -187,6 +194,7 @@ pub struct ChallengeStartMessage {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChallengeFrameBatchMessage {
+    pub attempt_id: String,
     pub challenge_id: String,
     pub batch_index: usize,
     pub frames: Vec<ChallengeFrameData>,
@@ -238,6 +246,7 @@ pub struct ChallengeTelemetry {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChallengeEndMessage {
+    pub attempt_id: String,
     pub challenge_id: String,
     pub timestamp: u64,
 }

@@ -285,9 +285,14 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
           border: challengeCompleted ? "2px solid #10b981" : challengeState === 'transitioning' ? "2px solid #f59e0b" : "2px solid #3b82f6"
         }}>
           {challengeCompleted 
-            ? "✅ Desafio Completado!" 
+            ? (challengeState === 'idle' ? "✅ Desafio Completado!" : "✅ Desafio Completado! 🔄 Preparando próximo...")
             : challengeState === 'transitioning' 
-              ? "🔄 Preparando próximo..." 
+              ? (
+                <span>
+                  🔄 Preparando próximo...
+                  <span style={{ marginLeft: 8, letterSpacing: 2 }}>● ● ●</span>
+                </span>
+              )
               : guideType 
                 ? `🎯 ${getInstructionText(guideType)}` 
                 : `🎯 ${lastPrompt?.kind}`}

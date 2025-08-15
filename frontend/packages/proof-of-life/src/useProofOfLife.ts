@@ -20,6 +20,7 @@ interface ChallengeFrameData {
 }
 
 interface ChallengeDataBuffer {
+  attemptId?: string;
   challengeId: string;
   challengeType: 'look_right' | 'look_left' | 'look_up' | 'open_mouth';
   startTime: number;
@@ -163,6 +164,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
   const challengeStateRef = useRef<'idle' | 'active' | 'completed' | 'transitioning'>('idle');
   const challengeCompletedRef = useRef<boolean>(false);
   const enableLivenessChallengeRef = useRef<boolean>(enableLivenessChallenge);
+  const currentAttemptIdRef = useRef<string | null>(null);
   
   // Buffer de dados por desafio
   const currentBufferRef = useRef<ChallengeDataBuffer | null>(null);
@@ -313,6 +315,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     console.log('🔧 createChallengeBuffer chamado com:', challenge);
     
     const buffer: ChallengeDataBuffer = {
+      attemptId: currentAttemptIdRef.current || undefined,
       challengeId: challenge.id,
       challengeType: challenge.type,
       startTime: Date.now(),
@@ -565,6 +568,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
       // Enviar metadados do desafio primeiro
       const challengeStartMessage = {
         type: "challengeStart",
+        attemptId: buffer.attemptId,
         challengeId: buffer.challengeId,
         challengeType: buffer.challengeType,
         startTime: buffer.startTime,
@@ -582,6 +586,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
         
         const batchMessage = {
           type: "challengeFrameBatch",
+          attemptId: buffer.attemptId,
           challengeId: buffer.challengeId,
           batchIndex: Math.floor(i / batchSize),
           frames: frameBatch.map(frame => ({
@@ -608,6 +613,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
       // Sinalizar fim do envio
       const challengeEndMessage = {
         type: "challengeEnd", 
+        attemptId: buffer.attemptId,
         challengeId: buffer.challengeId,
         timestamp: Date.now()
       };
@@ -823,27 +829,28 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
       setChallengeState('idle');
       challengeStateRef.current = 'idle';
       if (isStandaloneMode) {
-        setTimeout(() => startNextChallengeRef.current?.(), 400); // transição suave
+        setTimeout(() => startNextChallengeRef.current?.(), 1500);
       } else {
-        // Solicitar próximo prompt ao backend após completar envio do buffer
-        send({ type: 'feedback', status: 'continue' });
-        if (!promptWatchdogRef.current) {
-          promptWatchdogRef.current = window.setInterval(() => {
-            if (!streamingRef.current) {
-              if (promptWatchdogRef.current) {
-                clearInterval(promptWatchdogRef.current);
-                promptWatchdogRef.current = null;
+        setTimeout(() => {
+          send({ type: 'feedback', status: 'continue' });
+          if (!promptWatchdogRef.current) {
+            promptWatchdogRef.current = window.setInterval(() => {
+              if (!streamingRef.current) {
+                if (promptWatchdogRef.current) {
+                  clearInterval(promptWatchdogRef.current);
+                  promptWatchdogRef.current = null;
+                }
+                return;
               }
-              return;
-            }
-            if (!currentChallengeRef.current && challengeStateRef.current === 'idle') {
-              log('info', '🔔 (idle) Solicitando próximo prompt ao backend');
-              send({ type: 'feedback', status: 'continue' });
-            }
-          }, 500); // reagir mais rápido mas com intervalo curto
-        }
+              if (!currentChallengeRef.current && challengeStateRef.current === 'idle') {
+                log('info', '🔔 (idle) Solicitando próximo prompt ao backend');
+                send({ type: 'feedback', status: 'continue' });
+              }
+            }, 500);
+          }
+        }, 1500);
       }
-    }, 500); // reduzir tempo de tela preta
+    }, 1500);
   };
 
   const completeCurrentChallenge = useCallback(() => {
@@ -1608,6 +1615,24 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
                 };
                 requestAnimationFrame(loop);
               } else if (msg.type === "prompt") {
+                let incomingAttemptId: string | undefined = msg.challenge?.attemptId || msg.challenge?.attempt_id;
+                if (!incomingAttemptId && typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+                  incomingAttemptId = (crypto as any).randomUUID();
+                  log('info', '🪪 attemptId ausente no prompt - gerado localmente', { attemptId: incomingAttemptId });
+                }
+                if (incomingAttemptId && currentAttemptIdRef.current !== incomingAttemptId) {
+                  log('info', '🪪 Novo attemptId recebido - reiniciando contadores locais', { from: currentAttemptIdRef.current, to: incomingAttemptId });
+                  currentAttemptIdRef.current = incomingAttemptId;
+                  buffersHistoryRef.current = [];
+                  currentBufferRef.current = null;
+                  setTotalChallenges(0);
+                  setChallengeState('idle');
+                  challengeStateRef.current = 'idle';
+                  setChallengeCompleted(false);
+                  challengeCompletedRef.current = false;
+                } else if (incomingAttemptId) {
+                  currentAttemptIdRef.current = incomingAttemptId;
+                }
                 if (bypassValidation) {
                   log('info', "🔄 [BYPASS] Ignorando prompt - modo bypass ativo", msg.challenge?.kind);
                   return;
@@ -1688,6 +1713,10 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
                   log('info', "FrameAck com dados adicionais", { face: msg.face, pad: msg.pad });
                 }
               } else if (msg.type === "result") {
+                if (msg.attemptId && currentAttemptIdRef.current && msg.attemptId !== currentAttemptIdRef.current) {
+                  log('info', '⚠️ Ignorando result de attemptId antigo', { resultAttemptId: msg.attemptId, currentAttemptId: currentAttemptIdRef.current });
+                  return;
+                }
                 log('info', "Resultado recebido", msg.decision);
                 setStatus(msg.decision?.passed ? "passed" : "failed");
                 setLastPrompt(undefined); // Limpar prompt quando finalizar
@@ -1696,6 +1725,12 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
                   clearInterval(promptWatchdogRef.current);
                   promptWatchdogRef.current = null;
                 }
+              } else if (msg.type === "challengeResult") {
+                if (msg.attemptId && currentAttemptIdRef.current && msg.attemptId !== currentAttemptIdRef.current) {
+                  log('info', '⚠️ Ignorando challengeResult de attemptId antigo', { resultAttemptId: msg.attemptId, currentAttemptId: currentAttemptIdRef.current });
+                  return;
+                }
+                log('info', '📦 Resultado de desafio recebido', { challengeId: msg.challengeId, decision: msg.decision });
               }
             } catch {}
           };

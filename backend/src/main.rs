@@ -75,10 +75,13 @@ struct Session {
     tele: TelemetryState,
     #[serde(skip_serializing)]
     challenge_buffer: Option<ChallengeBufferState>,
+    #[serde(skip_serializing)]
+    current_attempt_id: String,
 }
 
 #[derive(Clone)]
 struct ChallengeBufferState {
+    attempt_id: String,
     challenge_id: String,
     challenge_type: String,
     start_time: u64,
@@ -298,6 +301,7 @@ async fn create_session(State(state): State<AppState>) -> impl IntoResponse {
         pad_state: pad::PadState::default(),
         tele: TelemetryState::default(),
         challenge_buffer: None,
+        current_attempt_id: uuid::Uuid::new_v4().to_string(),
     };
     {
         let mut sessions = state.sessions.write().await;
@@ -377,10 +381,11 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
     // Initial prompt (restricted to supported kinds by current frontend)
     {
-        let prompt = ServerMessage::Prompt { challenge: protocol::PromptChallenge { id: "c1", kind: ChallengeKind::OpenMouth, timeout_ms: 5000 } };
-        let _ = socket.send(Message::Text(serde_json::to_string(&prompt).unwrap())).await;
         let mut sessions = state.sessions.write().await;
         if let Some(s) = sessions.values_mut().next() {
+            let aid = s.current_attempt_id.clone();
+            let prompt = ServerMessage::Prompt { challenge: protocol::PromptChallenge { id: "c1", kind: ChallengeKind::OpenMouth, timeout_ms: 5000, attempt_id: &aid } };
+            let _ = socket.send(Message::Text(serde_json::to_string(&prompt).unwrap())).await;
             s.fsm.state = FsmState::Prompting { challenge_id: "c1".to_string(), kind: ChallengeKind::OpenMouth };
         }
     }
@@ -465,7 +470,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                                 };
                                                 if let Some(nk) = next_kind {
                                                     let next_id = format!("c{}", s.fsm.completed + 1);
-                                                    let next = ServerMessage::Prompt { challenge: protocol::PromptChallenge { id: &next_id, kind: nk.clone(), timeout_ms: 5000 } };
+                                                    let aid = s.current_attempt_id.clone();
+                                                    let next = ServerMessage::Prompt { challenge: protocol::PromptChallenge { id: &next_id, kind: nk.clone(), timeout_ms: 5000, attempt_id: &aid } };
                                                     println!("🎯 Enviando próximo desafio: {:?} ({})", nk, next_id);
                                                     let _ = socket.send(Message::Text(serde_json::to_string(&next).unwrap())).await;
                                                     *kind = nk;
@@ -478,8 +484,12 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                 }
                             }
                             if done {
-                                let result = ServerMessage::Result { decision: protocol::Decision { passed: true, reason: None } };
-                                let _ = socket.send(Message::Text(serde_json::to_string(&result).unwrap())).await;
+                                let mut sessions = state.sessions.write().await;
+                                if let Some(s) = sessions.values_mut().next() {
+                                    let aid = s.current_attempt_id.clone();
+                                    let result = ServerMessage::Result { attempt_id: &aid, decision: protocol::Decision { passed: true, reason: None } };
+                                    let _ = socket.send(Message::Text(serde_json::to_string(&result).unwrap())).await;
+                                }
                             }
                         }
                         ClientMessage::ChallengeStart(challenge_start) => {
@@ -487,7 +497,15 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                             
                             let mut sessions = state.sessions.write().await;
                             if let Some(s) = sessions.values_mut().next() {
+                                if s.current_attempt_id != challenge_start.attempt_id {
+                                    s.current_attempt_id = challenge_start.attempt_id.clone();
+                                    s.fsm = SessionFsm::new();
+                                    s.tele.reset();
+                                    s.challenge_buffer = None;
+                                    println!("🔄 [BUFFER] Novo attempt_id: {} - reiniciando estado", s.current_attempt_id);
+                                }
                                 s.challenge_buffer = Some(ChallengeBufferState {
+                                    attempt_id: challenge_start.attempt_id.clone(),
                                     challenge_id: challenge_start.challenge_id.clone(),
                                     challenge_type: challenge_start.challenge_type.clone(),
                                     start_time: challenge_start.start_time,
@@ -507,16 +525,20 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                             
                             let mut sessions = state.sessions.write().await;
                             if let Some(s) = sessions.values_mut().next() {
+                                if s.current_attempt_id != frame_batch.attempt_id {
+                                    println!("⚠️ [BUFFER] attempt_id não corresponde: esperado {}, recebido {} — ignorando lote", s.current_attempt_id, frame_batch.attempt_id);
+                                    continue;
+                                }
                                 if let Some(ref mut buffer) = s.challenge_buffer {
-                                    if buffer.challenge_id == frame_batch.challenge_id {
+                                    if buffer.attempt_id == frame_batch.attempt_id && buffer.challenge_id == frame_batch.challenge_id {
                                         buffer.frames.extend(frame_batch.frames);
                                         buffer.received_batches += 1;
                                         
                                         println!("📦 [BUFFER] Buffer atualizado: {} frames recebidos em {} lotes", 
                                             buffer.frames.len(), buffer.received_batches);
                                     } else {
-                                        println!("⚠️ [BUFFER] ID de desafio não corresponde: esperado {}, recebido {}", 
-                                            buffer.challenge_id, frame_batch.challenge_id);
+                                        println!("⚠️ [BUFFER] IDs não correspondem: attempt {} vs {}, desafio {} vs {}", 
+                                            buffer.attempt_id, frame_batch.attempt_id, buffer.challenge_id, frame_batch.challenge_id);
                                     }
                                 } else {
                                     println!("⚠️ [BUFFER] Nenhum buffer ativo para receber frames");
@@ -529,7 +551,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                             let mut sessions = state.sessions.write().await;
                             if let Some(s) = sessions.values_mut().next() {
                                 if let Some(buffer) = s.challenge_buffer.take() {
-                                    if buffer.challenge_id == challenge_end.challenge_id {
+                                    if s.current_attempt_id == challenge_end.attempt_id && buffer.attempt_id == challenge_end.attempt_id && buffer.challenge_id == challenge_end.challenge_id {
                                         // Analisar o buffer completo
                                         let analysis = analyze_challenge_buffer(&buffer);
                                         
@@ -538,6 +560,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                         
                                         // Enviar resultado
                                         let result = ServerMessage::ChallengeResult {
+                                            attempt_id: buffer.attempt_id.clone(),
                                             challenge_id: buffer.challenge_id.clone(),
                                             decision: decision.clone(),
                                             analysis,
@@ -559,7 +582,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                                 s.fsm.state = FsmState::Passed;
                                                 println!("🎉 [BUFFER] Todos os 3 desafios concluídos! Proof of life PASSED");
                                                 
+                                                let aid = s.current_attempt_id.clone();
                                                 let final_result = ServerMessage::Result { 
+                                                    attempt_id: &aid,
                                                     decision: protocol::Decision { passed: true, reason: None } 
                                                 };
                                                 let _ = socket.send(Message::Text(serde_json::to_string(&final_result).unwrap())).await;
@@ -571,7 +596,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                                     let idx = (s.fsm.completed as usize) % all.len();
                                                     let nk = all[idx].clone();
                                                     let next_id = format!("c{}", s.fsm.completed + 1);
-                                                    let next = ServerMessage::Prompt { challenge: protocol::PromptChallenge { id: &next_id, kind: nk.clone(), timeout_ms: 5000 } };
+                                                    let aid = s.current_attempt_id.clone();
+                                                    let next = ServerMessage::Prompt { challenge: protocol::PromptChallenge { id: &next_id, kind: nk.clone(), timeout_ms: 5000, attempt_id: &aid } };
                                                     let _ = socket.send(Message::Text(serde_json::to_string(&next).unwrap())).await;
                                                     s.fsm.state = FsmState::Prompting { challenge_id: next_id, kind: nk };
                                                 }
@@ -588,14 +614,17 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                                     let idx = ((s.fsm.completed + s.fsm.failed) as usize) % all.len();
                                                     let nk = all[idx].clone();
                                                     let next_id = format!("c{}", s.fsm.completed + s.fsm.failed + 1);
-                                                    let next = ServerMessage::Prompt { challenge: protocol::PromptChallenge { id: &next_id, kind: nk.clone(), timeout_ms: 5000 } };
+                                                    let aid = s.current_attempt_id.clone();
+                                                    let next = ServerMessage::Prompt { challenge: protocol::PromptChallenge { id: &next_id, kind: nk.clone(), timeout_ms: 5000, attempt_id: &aid } };
                                                     let _ = socket.send(Message::Text(serde_json::to_string(&next).unwrap())).await;
                                                     s.fsm.state = FsmState::Prompting { challenge_id: next_id, kind: nk };
                                                 }
                                             } else {
                                                 // Finalizar com resultado agregado
                                                 let final_passed = s.fsm.completed >= 3; // exige todos passarem
+                                                let aid = s.current_attempt_id.clone();
                                                 let final_result = ServerMessage::Result { 
+                                                    attempt_id: &aid,
                                                     decision: protocol::Decision { passed: final_passed, reason: None }
                                                 };
                                                 let _ = socket.send(Message::Text(serde_json::to_string(&final_result).unwrap())).await;
@@ -603,8 +632,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                             }
                                         }
                                     } else {
-                                        println!("⚠️ [BUFFER] ID de desafio não corresponde: esperado {}, recebido {}", 
-                                            buffer.challenge_id, challenge_end.challenge_id);
+                                        println!("⚠️ [BUFFER] IDs não correspondem no fim: attempt {} vs {}, desafio {} vs {}", 
+                                            buffer.attempt_id, challenge_end.attempt_id, buffer.challenge_id, challenge_end.challenge_id);
                                     }
                                 } else {
                                     println!("⚠️ [BUFFER] Nenhum buffer ativo para finalizar");
@@ -679,7 +708,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                 match &mut s.fsm.state {
                                     FsmState::Prompting { challenge_id, kind } => {
                                         if fb.status.as_deref() == Some("continue") {
-                                            let prompt = ServerMessage::Prompt { challenge: protocol::PromptChallenge { id: &challenge_id, kind: kind.clone(), timeout_ms: 5000 } };
+                                            let aid = s.current_attempt_id.clone();
+                                            let prompt = ServerMessage::Prompt { challenge: protocol::PromptChallenge { id: &challenge_id, kind: kind.clone(), timeout_ms: 5000, attempt_id: &aid } };
                                             let _ = socket.send(Message::Text(serde_json::to_string(&prompt).unwrap())).await;
                                         }
                                         let ok = fb.ok.unwrap_or(false);
@@ -688,10 +718,14 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                             s.fsm.completed += 1;
                                             if s.fsm.completed >= 2 {
                                                 s.fsm.state = FsmState::Passed;
+                                                let aid = s.current_attempt_id.clone();
+                                                let result = ServerMessage::Result { attempt_id: &aid, decision: protocol::Decision { passed: true, reason: None } };
+                                                let _ = socket.send(Message::Text(serde_json::to_string(&result).unwrap())).await;
                                                 done = true;
                                             } else {
                                                 let next_kind = if time::OffsetDateTime::now_utc().nanosecond() % 2 == 0 { ChallengeKind::TurnLeft } else { ChallengeKind::TurnRight };
-                                                let next = ServerMessage::Prompt { challenge: protocol::PromptChallenge { id: "c2", kind: next_kind.clone(), timeout_ms: 5000 } };
+                                                let aid = s.current_attempt_id.clone();
+                                                let next = ServerMessage::Prompt { challenge: protocol::PromptChallenge { id: "c2", kind: next_kind.clone(), timeout_ms: 5000, attempt_id: &aid } };
                                                 let _ = socket.send(Message::Text(serde_json::to_string(&next).unwrap())).await;
                                                 *kind = next_kind;
                                                 *challenge_id = "c2".to_string();
@@ -702,8 +736,12 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                 }
                             }
                             if done {
-                                let result = ServerMessage::Result { decision: protocol::Decision { passed: true, reason: None } };
-                                let _ = socket.send(Message::Text(serde_json::to_string(&result).unwrap())).await;
+                                let mut sessions = state.sessions.write().await;
+                                if let Some(s) = sessions.values_mut().next() {
+                                    let aid = s.current_attempt_id.clone();
+                                    let result = ServerMessage::Result { attempt_id: &aid, decision: protocol::Decision { passed: true, reason: None } };
+                                    let _ = socket.send(Message::Text(serde_json::to_string(&result).unwrap())).await;
+                                }
                                 break;
                             }
                         }
