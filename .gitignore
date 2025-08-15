@@ -8,11 +8,14 @@ pnpm-lock.yaml
 yarn.lock
 package-lock.json
 
+# Build outputs
+dist/
+**/dist/
+build/
+**/build/
+
 # IDE/OS
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
-
-
-dist
