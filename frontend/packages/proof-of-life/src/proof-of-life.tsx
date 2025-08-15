@@ -162,7 +162,7 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
 
   const maskStyle: React.CSSProperties = {
     position: "relative",
-    width: 400,
+    width: 380,
     height: 500,
     borderRadius: "50% / 60%",
     overflow: "hidden",
@@ -171,8 +171,8 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
 
   const containerStyle: React.CSSProperties = {
     position: "relative",
-    width: 420,
-    height: 520,
+    width: 380,
+    height: 500,
     display: "flex",
     alignItems: "center",
     justifyContent: "center"
@@ -186,8 +186,8 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
         <ProgressRing 
           progress={progress} 
           color={ringColor} 
-          width={420} 
-          height={520}
+          width={380} 
+          height={500}
           strokeWidth={6} 
         />
         <div style={maskStyle}>

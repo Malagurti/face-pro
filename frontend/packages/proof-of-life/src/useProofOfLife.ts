@@ -186,10 +186,10 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const eyebrowCenter = { x: (eyebrowLeft.x + eyebrowRight.x) / 2, y: (eyebrowLeft.y + eyebrowRight.y) / 2 };
     const faceHeight = Math.abs(chinBottom.y - eyebrowCenter.y);
     
-    console.log("👁️ analyzeLookUp:", { faceHeight, threshold: 0.30, detected: faceHeight < 0.30, eyebrowY: eyebrowCenter.y, chinY: chinBottom.y });
+    console.log("👁️ analyzeLookUp:", { faceHeight, threshold: 0.35, detected: faceHeight < 0.35, eyebrowY: eyebrowCenter.y, chinY: chinBottom.y });
     // Detectar se a cabeça está levantada (face comprimida verticalmente)
     // Pelos logs, valores normais são 0.36-0.54, então para detectar "up" deve ser menor
-    return faceHeight < 0.30; // Threshold para detectar cabeça para cima (corrigido)
+    return faceHeight < 0.35; // Threshold para detectar cabeça para cima (ajustado)
   }, []);
 
   const analyzeOpenMouth = useCallback((landmarks: any) => {
