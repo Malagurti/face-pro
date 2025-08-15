@@ -20,7 +20,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 mod protocol;
 mod infer;
-use protocol::{ClientMessage, ServerMessage, ChallengeKind};
+use protocol::{ClientMessage, ServerMessage, ChallengeKind, ChallengeFrameData};
 mod models;
 mod inference;
 mod pad;
@@ -70,6 +70,19 @@ struct Session {
     pad_state: pad::PadState,
     #[serde(skip_serializing)]
     tele: TelemetryState,
+    #[serde(skip_serializing)]
+    challenge_buffer: Option<ChallengeBufferState>,
+}
+
+#[derive(Clone)]
+struct ChallengeBufferState {
+    challenge_id: String,
+    challenge_type: String,
+    start_time: u64,
+    frames: Vec<ChallengeFrameData>,
+    total_expected_frames: usize,
+    received_batches: usize,
+    gesture_detected: bool,
 }
 #[derive(Clone, Default, Serialize)]
 struct SessionMetrics {
@@ -280,6 +293,7 @@ async fn create_session(State(state): State<AppState>) -> impl IntoResponse {
         fsm: SessionFsm::new(),
         pad_state: pad::PadState::default(),
         tele: TelemetryState::default(),
+        challenge_buffer: None,
     };
     {
         let mut sessions = state.sessions.write().await;
@@ -464,6 +478,98 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                 let _ = socket.send(Message::Text(serde_json::to_string(&result).unwrap())).await;
                             }
                         }
+                        ClientMessage::ChallengeStart(challenge_start) => {
+                            println!("📦 [BUFFER] Iniciando desafio: {} ({})", challenge_start.challenge_id, challenge_start.challenge_type);
+                            
+                            let mut sessions = state.sessions.write().await;
+                            if let Some(s) = sessions.values_mut().next() {
+                                s.challenge_buffer = Some(ChallengeBufferState {
+                                    challenge_id: challenge_start.challenge_id.clone(),
+                                    challenge_type: challenge_start.challenge_type.clone(),
+                                    start_time: challenge_start.start_time,
+                                    frames: Vec::new(),
+                                    total_expected_frames: challenge_start.total_frames,
+                                    received_batches: 0,
+                                    gesture_detected: challenge_start.gesture_detected,
+                                });
+                                
+                                println!("📦 [BUFFER] Buffer inicializado para desafio {} com {} frames esperados", 
+                                    challenge_start.challenge_id, challenge_start.total_frames);
+                            }
+                        }
+                        ClientMessage::ChallengeFrameBatch(frame_batch) => {
+                            println!("📦 [BUFFER] Recebendo lote {} de {} frames para desafio {}", 
+                                frame_batch.batch_index, frame_batch.frames.len(), frame_batch.challenge_id);
+                            
+                            let mut sessions = state.sessions.write().await;
+                            if let Some(s) = sessions.values_mut().next() {
+                                if let Some(ref mut buffer) = s.challenge_buffer {
+                                    if buffer.challenge_id == frame_batch.challenge_id {
+                                        buffer.frames.extend(frame_batch.frames);
+                                        buffer.received_batches += 1;
+                                        
+                                        println!("📦 [BUFFER] Buffer atualizado: {} frames recebidos em {} lotes", 
+                                            buffer.frames.len(), buffer.received_batches);
+                                    } else {
+                                        println!("⚠️ [BUFFER] ID de desafio não corresponde: esperado {}, recebido {}", 
+                                            buffer.challenge_id, frame_batch.challenge_id);
+                                    }
+                                } else {
+                                    println!("⚠️ [BUFFER] Nenhum buffer ativo para receber frames");
+                                }
+                            }
+                        }
+                        ClientMessage::ChallengeEnd(challenge_end) => {
+                            println!("📦 [BUFFER] Finalizando desafio: {}", challenge_end.challenge_id);
+                            
+                            let mut sessions = state.sessions.write().await;
+                            if let Some(s) = sessions.values_mut().next() {
+                                if let Some(buffer) = s.challenge_buffer.take() {
+                                    if buffer.challenge_id == challenge_end.challenge_id {
+                                        // Analisar o buffer completo
+                                        let analysis = analyze_challenge_buffer(&buffer);
+                                        
+                                        // Tomar decisão baseada na análise
+                                        let decision = make_challenge_decision(&buffer, &analysis);
+                                        
+                                        // Enviar resultado
+                                        let result = ServerMessage::ChallengeResult {
+                                            challenge_id: buffer.challenge_id.clone(),
+                                            decision: decision.clone(),
+                                            analysis,
+                                        };
+                                        
+                                        if let Ok(result_json) = serde_json::to_string(&result) {
+                                            let _ = socket.send(Message::Text(result_json)).await;
+                                            println!("📦 [BUFFER] Resultado enviado para desafio {}: {:?}", 
+                                                buffer.challenge_id, decision);
+                                        }
+                                        
+                                        // Atualizar FSM se necessário
+                                        if decision.passed {
+                                            s.fsm.completed += 1;
+                                            println!("✅ [BUFFER] Desafio {} concluído! ({}/3)", 
+                                                buffer.challenge_id, s.fsm.completed);
+                                            
+                                            if s.fsm.completed >= 3 {
+                                                s.fsm.state = FsmState::Passed;
+                                                println!("🎉 [BUFFER] Todos os 3 desafios concluídos! Proof of life PASSED");
+                                                
+                                                let final_result = ServerMessage::Result { 
+                                                    decision: protocol::Decision { passed: true, reason: None } 
+                                                };
+                                                let _ = socket.send(Message::Text(serde_json::to_string(&final_result).unwrap())).await;
+                                            }
+                                        }
+                                    } else {
+                                        println!("⚠️ [BUFFER] ID de desafio não corresponde: esperado {}, recebido {}", 
+                                            buffer.challenge_id, challenge_end.challenge_id);
+                                    }
+                                } else {
+                                    println!("⚠️ [BUFFER] Nenhum buffer ativo para finalizar");
+                                }
+                            }
+                        }
                         ClientMessage::Frame(frame) => {
                             let now = Instant::now();
                             if let Some(prev) = last_frame_at {
@@ -629,6 +735,88 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             Message::Close(_) => break,
             Message::Binary(_) => {}
         }
+    }
+}
+
+// Funções para análise do buffer de desafio
+fn analyze_challenge_buffer(buffer: &ChallengeBufferState) -> protocol::ChallengeAnalysis {
+    let total_frames = buffer.frames.len();
+    let frames_with_face = buffer.frames.iter().filter(|f| f.face_present.unwrap_or(false)).count();
+    let frames_with_landmarks = buffer.frames.iter().filter(|f| f.landmarks.is_some()).count();
+    
+    let average_motion_score = if total_frames > 0 {
+        buffer.frames.iter()
+            .filter_map(|f| f.motion_score)
+            .sum::<f32>() / total_frames as f32
+    } else {
+        0.0
+    };
+    
+    let face_detection_rate = if total_frames > 0 {
+        frames_with_face as f32 / total_frames as f32
+    } else {
+        0.0
+    };
+    
+    let gesture_confidence = if buffer.gesture_detected {
+        // Calcular confiança baseada na qualidade dos dados
+        let quality_score = (face_detection_rate * 0.6) + (average_motion_score * 0.4);
+        (quality_score * 100.0).min(95.0) / 100.0
+    } else {
+        0.0
+    };
+    
+    let processing_time_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64 - buffer.start_time;
+    
+    let quality_score = (face_detection_rate * 0.7) + (average_motion_score * 0.3);
+    
+    protocol::ChallengeAnalysis {
+        total_frames,
+        frames_with_face,
+        frames_with_landmarks,
+        average_motion_score,
+        face_detection_rate,
+        gesture_confidence,
+        processing_time_ms,
+        quality_score,
+    }
+}
+
+fn make_challenge_decision(buffer: &ChallengeBufferState, analysis: &protocol::ChallengeAnalysis) -> protocol::Decision {
+    // Critérios para aprovação do desafio
+    let min_face_detection_rate = 0.7; // 70% dos frames devem ter face detectada
+    let min_quality_score = 0.6; // Score mínimo de qualidade
+    let min_frames = 10; // Mínimo de frames para análise válida
+    
+    let face_ok = analysis.face_detection_rate >= min_face_detection_rate;
+    let quality_ok = analysis.quality_score >= min_quality_score;
+    let frames_ok = analysis.total_frames >= min_frames;
+    let gesture_ok = buffer.gesture_detected;
+    
+    let passed = face_ok && quality_ok && frames_ok && gesture_ok;
+    
+    let reason = if !passed {
+        if !face_ok {
+            Some("Taxa de detecção facial muito baixa")
+        } else if !quality_ok {
+            Some("Qualidade dos dados insuficiente")
+        } else if !frames_ok {
+            Some("Número insuficiente de frames")
+        } else if !gesture_ok {
+            Some("Gesto não detectado")
+        } else {
+            Some("Critérios não atendidos")
+        }
+    } else {
+        None
+    };
+    
+    protocol::Decision {
+        passed,
+        reason,
     }
 }
 

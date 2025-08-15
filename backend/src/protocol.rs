@@ -12,6 +12,9 @@ pub enum ClientMessage {
     Frame(FrameMessage),
     Telemetry(TelemetryMessage),
     Feedback(FeedbackMessage),
+    ChallengeStart(ChallengeStartMessage),
+    ChallengeFrameBatch(ChallengeFrameBatchMessage),
+    ChallengeEnd(ChallengeEndMessage),
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -117,6 +120,11 @@ pub enum ServerMessage<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         pad: Option<PadDebug>,
     },
+    ChallengeResult {
+        challenge_id: String,
+        decision: Decision,
+        analysis: ChallengeAnalysis,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -156,12 +164,95 @@ pub enum ChallengeKind {
     HeadDown,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Decision {
     pub passed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'static str>,
+}
+
+// Estruturas para o sistema de buffer
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChallengeStartMessage {
+    pub challenge_id: String,
+    pub challenge_type: String,
+    pub start_time: u64,
+    pub total_frames: usize,
+    pub completion_time: Option<u64>,
+    pub gesture_detected: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChallengeFrameBatchMessage {
+    pub challenge_id: String,
+    pub batch_index: usize,
+    pub frames: Vec<ChallengeFrameData>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChallengeFrameData {
+    pub timestamp: f64,
+    pub frame_id: u64,
+    #[serde(default)]
+    pub image_data: Option<String>,
+    #[serde(default)]
+    pub motion_score: Option<f32>,
+    #[serde(default)]
+    pub ahash: Option<String>,
+    #[serde(default)]
+    pub face_present: Option<bool>,
+    #[serde(default)]
+    pub face_box: Option<ChallengeFaceBox>,
+    #[serde(default)]
+    pub landmarks: Option<serde_json::Value>,
+    #[serde(default)]
+    pub telemetry: Option<ChallengeTelemetry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChallengeFaceBox {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChallengeTelemetry {
+    #[serde(default)]
+    pub fps: Option<f32>,
+    #[serde(default)]
+    pub rtt_ms: Option<u32>,
+    #[serde(default)]
+    pub cam_width: Option<u32>,
+    #[serde(default)]
+    pub cam_height: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChallengeEndMessage {
+    pub challenge_id: String,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChallengeAnalysis {
+    pub total_frames: usize,
+    pub frames_with_face: usize,
+    pub frames_with_landmarks: usize,
+    pub average_motion_score: f32,
+    pub face_detection_rate: f32,
+    pub gesture_confidence: f32,
+    pub processing_time_ms: u64,
+    pub quality_score: f32,
 }
 
 
