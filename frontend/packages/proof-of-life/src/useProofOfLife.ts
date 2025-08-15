@@ -629,7 +629,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
   // Sistema de desafios controlados sequencialmente
   const generateChallengeQueueRef = useRef(() => {
     log('info', '🎲 Gerando nova fila de desafios...');
-    const allChallenges: Array<'look_right' | 'look_left' | 'look_up' | 'open_mouth'> = ['look_right', 'look_left', 'look_up', 'open_mouth'];
+    const allChallenges: Array<'look_right' | 'look_left' | 'look_up' | 'open_mouth'> = ['look_right', 'look_left', 'open_mouth', 'look_up'];
     const shuffled = [...allChallenges].sort(() => Math.random() - 0.5);
     challengeQueue.current = shuffled.slice(0, maxChallenges);
     log('info', `🎯 Fila de ${maxChallenges} desafios gerada:`, challengeQueue.current);

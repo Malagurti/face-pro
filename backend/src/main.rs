@@ -302,7 +302,7 @@ async fn create_session(State(state): State<AppState>) -> impl IntoResponse {
     let body = CreateSessionResponse {
         session_id,
         token,
-        challenges: vec!["blink", "turn-left", "turn-right"],
+        challenges: vec!["turn-right", "turn-left", "open-mouth", "head-up"],
     };
     (StatusCode::CREATED, Json(body))
 }
