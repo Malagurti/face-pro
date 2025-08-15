@@ -30,33 +30,38 @@ export type ProofOfLifeProps = UseProofOfLifeOptions & {
 interface ProgressRingProps {
   progress: number; // 0-100
   color: string;
-  size: number;
+  width: number;
+  height: number;
   strokeWidth: number;
 }
 
-const ProgressRing: React.FC<ProgressRingProps> = ({ progress, color, size, strokeWidth }) => {
-  const radius = (size - strokeWidth) / 2;
-  const circumference = radius * 2 * Math.PI;
+const ProgressRing: React.FC<ProgressRingProps> = ({ progress, color, width, height, strokeWidth }) => {
+  // Criar uma elipse oval
+  const rx = (width - strokeWidth) / 2;
+  const ry = (height - strokeWidth) / 2;
+  const circumference = 2 * Math.PI * Math.sqrt((rx * rx + ry * ry) / 2);
   const offset = circumference - (progress / 100) * circumference;
 
   return (
     <svg
-      width={size}
-      height={size}
+      width={width}
+      height={height}
       style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%) rotate(-90deg)' }}
     >
-      <circle
-        cx={size / 2}
-        cy={size / 2}
-        r={radius}
+      <ellipse
+        cx={width / 2}
+        cy={height / 2}
+        rx={rx}
+        ry={ry}
         stroke="rgba(255,255,255,0.2)"
         strokeWidth={strokeWidth}
         fill="transparent"
       />
-      <circle
-        cx={size / 2}
-        cy={size / 2}
-        r={radius}
+      <ellipse
+        cx={width / 2}
+        cy={height / 2}
+        rx={rx}
+        ry={ry}
         stroke={color}
         strokeWidth={strokeWidth}
         fill="transparent"
@@ -153,8 +158,8 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
 
   const maskStyle: React.CSSProperties = {
     position: "relative",
-    width: 240,
-    height: 320,
+    width: 400,
+    height: 500,
     borderRadius: "50% / 60%",
     overflow: "hidden",
     background: "black",
@@ -162,8 +167,8 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
 
   const containerStyle: React.CSSProperties = {
     position: "relative",
-    width: 250,
-    height: 330,
+    width: 420,
+    height: 520,
     display: "flex",
     alignItems: "center",
     justifyContent: "center"
@@ -177,11 +182,12 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
         <ProgressRing 
           progress={progress} 
           color={ringColor} 
-          size={250} 
+          width={420} 
+          height={520}
           strokeWidth={6} 
         />
         <div style={maskStyle}>
-          <video ref={vidRef} data-proof-of-life autoPlay playsInline muted width={240} height={320} style={{ objectFit: "cover", width: "100%", height: "100%" }} />
+          <video ref={vidRef} data-proof-of-life autoPlay playsInline muted width={700} height={500} style={{ objectFit: "cover", width: "100%", height: "100%" }} />
 
           {currentChallenge && (
             <div style={{ 

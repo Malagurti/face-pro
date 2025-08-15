@@ -348,8 +348,8 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     if (!video) return;
     if (!canvasRef.current) canvasRef.current = document.createElement("canvas");
     const canvas = canvasRef.current;
-    canvas.width = video.videoWidth || 320;
-    canvas.height = video.videoHeight || 240;
+    canvas.width = video.videoWidth || 700;
+    canvas.height = video.videoHeight || 500;
     const ctx = (canvas.getContext("2d", { willReadFrequently: true } as any) || canvas.getContext("2d")) as CanvasRenderingContext2D | null;
     if (!ctx) return;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
@@ -357,14 +357,14 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     if (bypassValidation) {
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       
-      // Reduzir resolução para 160x120 para economizar largura de banda
+      // Reduzir resolução para 350x250 para manter qualidade adequada
       const reducedCanvas = document.createElement('canvas');
-      reducedCanvas.width = 160;
-      reducedCanvas.height = 120;
+      reducedCanvas.width = 350;
+      reducedCanvas.height = 250;
       const reducedCtx = reducedCanvas.getContext('2d');
       if (reducedCtx) {
-        reducedCtx.drawImage(canvas, 0, 0, 160, 120);
-        var reducedImageData = reducedCtx.getImageData(0, 0, 160, 120);
+        reducedCtx.drawImage(canvas, 0, 0, 350, 250);
+        var reducedImageData = reducedCtx.getImageData(0, 0, 350, 250);
       } else {
         var reducedImageData = imageData; // fallback
       }
@@ -658,8 +658,8 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     try {
       const defaultConstraints: MediaStreamConstraints = {
         video: videoConstraints ?? {
-          width: { ideal: 320 },
-          height: { ideal: 240 },
+          width: { ideal: 700 },
+          height: { ideal: 500 },
           frameRate: { ideal: 15 },
           facingMode: "user",
         },
@@ -810,8 +810,8 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
         if (!preparingRef.current) return;
         captureAndSendFrame();
         const v = document.querySelector("video[data-proof-of-life]") as HTMLVideoElement | null;
-        const vw = v?.videoWidth || 320;
-        const vh = v?.videoHeight || 240;
+        const vw = v?.videoWidth || 700;
+        const vh = v?.videoHeight || 500;
         let okNow = false;
         
         // Simplificado: apenas detectar face para estar pronto
