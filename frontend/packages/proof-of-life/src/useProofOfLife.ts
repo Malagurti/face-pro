@@ -85,7 +85,14 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
 
   // Otimizações para modo standalone
   const isStandaloneMode = useMemo(() => {
-    return !backendUrl || !sessionId || !token || sessionId === "" || token === "";
+    const result = !backendUrl || !sessionId || !token || sessionId === "" || token === "";
+    console.log('🔍 Verificação de modo standalone:', { 
+      result, 
+      backendUrl: !!backendUrl, 
+      sessionId: !!sessionId, 
+      token: !!token 
+    });
+    return result;
   }, [backendUrl, sessionId, token]);
 
   // Intervalos otimizados para standalone
@@ -210,10 +217,18 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const eyeCenter = { x: (leftEye.x + rightEye.x) / 2, y: (leftEye.y + rightEye.y) / 2 };
     const noseOffset = noseTip.x - eyeCenter.x;
     
-    const threshold = 0.06;
-    console.log("👁️ analyzeLookRight:", { noseOffset, threshold, detected: noseOffset > threshold, eyeCenter: eyeCenter.x, noseTip: noseTip.x });
+    // Threshold mais permissivo para modo standalone
+    const threshold = isStandaloneMode ? 0.03 : 0.06; // 50% mais permissivo para standalone
+    console.log("👁️ analyzeLookRight:", { 
+      noseOffset, 
+      threshold, 
+      detected: noseOffset > threshold, 
+      eyeCenter: eyeCenter.x, 
+      noseTip: noseTip.x,
+      mode: isStandaloneMode ? 'standalone' : 'normal'
+    });
     return noseOffset > threshold;
-  }, []);
+  }, [isStandaloneMode]);
 
   const analyzeLookLeft = useCallback((landmarks: any) => {
     if (!landmarks || landmarks.length === 0) return false;
@@ -227,10 +242,18 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const eyeCenter = { x: (leftEye.x + rightEye.x) / 2, y: (leftEye.y + rightEye.y) / 2 };
     const noseOffset = noseTip.x - eyeCenter.x;
     
-    const threshold = -0.06;
-    console.log("👁️ analyzeLookLeft:", { noseOffset, threshold, detected: noseOffset < threshold, eyeCenter: eyeCenter.x, noseTip: noseTip.x });
+    // Threshold mais permissivo para modo standalone
+    const threshold = isStandaloneMode ? -0.02 : -0.06; // 67% mais permissivo para standalone
+    console.log("👁️ analyzeLookLeft:", { 
+      noseOffset, 
+      threshold, 
+      detected: noseOffset < threshold, 
+      eyeCenter: eyeCenter.x, 
+      noseTip: noseTip.x,
+      mode: isStandaloneMode ? 'standalone' : 'normal'
+    });
     return noseOffset < threshold;
-  }, []);
+  }, [isStandaloneMode]);
 
   const analyzeLookUp = useCallback((landmarks: any) => {
     if (!landmarks || landmarks.length === 0) return false;
@@ -244,10 +267,18 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const eyebrowCenter = { x: (eyebrowLeft.x + eyebrowRight.x) / 2, y: (eyebrowLeft.y + eyebrowRight.y) / 2 };
     const faceHeight = Math.abs(chinBottom.y - eyebrowCenter.y);
     
-    const threshold = 0.40;
-    console.log("👁️ analyzeLookUp:", { faceHeight, threshold, detected: faceHeight < threshold, eyebrowY: eyebrowCenter.y, chinY: chinBottom.y });
+    // Threshold mais permissivo para modo standalone
+    const threshold = isStandaloneMode ? 0.50 : 0.40; // Mais permissivo para standalone (valor maior)
+    console.log("👁️ analyzeLookUp:", { 
+      faceHeight, 
+      threshold, 
+      detected: faceHeight < threshold, 
+      eyebrowY: eyebrowCenter.y, 
+      chinY: chinBottom.y,
+      mode: isStandaloneMode ? 'standalone' : 'normal'
+    });
     return faceHeight < threshold;
-  }, []);
+  }, [isStandaloneMode]);
 
   const analyzeOpenMouth = useCallback((landmarks: any) => {
     if (!landmarks || landmarks.length === 0) return false;
@@ -263,10 +294,18 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const mouthWidth = Math.abs(mouthRight.x - mouthLeft.x);
     const mouthAspectRatio = mouthHeight / mouthWidth;
     
-    const threshold = 0.55;
-    console.log("👁️ analyzeOpenMouth:", { mouthHeight, mouthWidth, mouthAspectRatio, threshold, detected: mouthAspectRatio > threshold });
+    // Threshold mais permissivo para modo standalone
+    const threshold = isStandaloneMode ? 0.35 : 0.55; // 36% mais permissivo para standalone
+    console.log("👁️ analyzeOpenMouth:", { 
+      mouthHeight, 
+      mouthWidth, 
+      mouthAspectRatio, 
+      threshold, 
+      detected: mouthAspectRatio > threshold,
+      mode: isStandaloneMode ? 'standalone' : 'normal'
+    });
     return mouthAspectRatio > threshold;
-  }, []);
+  }, [isStandaloneMode]);
 
   const analyzeGesture = useCallback((landmarks: any) => {
     // Usar ref para consistência com o loop de detecção
@@ -296,7 +335,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
         console.log("❌ Tipo de desafio desconhecido:", currentChallengeFromRef.type);
         return false;
     }
-  }, [currentChallenge, analyzeLookRight, analyzeLookLeft, analyzeLookUp, analyzeOpenMouth]);
+  }, [analyzeLookRight, analyzeLookLeft, analyzeLookUp, analyzeOpenMouth]);
 
   const logRef = useRef(onLog);
   logRef.current = onLog;
@@ -650,15 +689,23 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
       challengeState,
       totalChallenges,
       maxChallenges,
-      queueLength: challengeQueue.current.length
+      queueLength: challengeQueue.current.length,
+      isStandaloneMode
     });
     
     console.log('🔍 Verificação de estado em startNextChallenge:', {
       challengeState,
       challengeStateRef: challengeStateRef.current,
       currentChallenge: currentChallengeRef.current,
-      challengeCompleted: challengeCompletedRef.current
+      challengeCompleted: challengeCompletedRef.current,
+      isStandaloneMode
     });
+    
+    // Limpar buffer anterior se existir
+    if (currentBufferRef.current) {
+      console.log('🧹 Limpando buffer anterior antes de iniciar novo desafio');
+      clearCurrentBuffer();
+    }
     
     if (challengeState !== 'idle' && challengeState !== 'transitioning') {
       log('warn', '⚠️ Tentativa de iniciar desafio com estado inválido:', challengeState);
@@ -763,7 +810,8 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     console.log('🔍 Verificação em completeCurrentChallenge:', {
       currentChallengeRef: currentChallengeRef.current,
       challengeCompletedRef: challengeCompletedRef.current,
-      challengeStateRef: challengeStateRef.current
+      challengeStateRef: challengeStateRef.current,
+      isStandaloneMode
     });
     
     if (!currentChallengeRef.current || challengeCompletedRef.current || challengeStateRef.current !== 'active') {
@@ -787,6 +835,13 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     
     // Completar buffer e enviar para o backend (funciona tanto com backend quanto standalone)
     if (enableDataBuffering && currentBufferRef.current) {
+      console.log('📦 Completando buffer para desafio:', {
+        challengeId: currentBufferRef.current.challengeId,
+        type: currentBufferRef.current.challengeType,
+        frames: currentBufferRef.current.frames.length,
+        isStandaloneMode
+      });
+      
       const completedBuffer = completeBuffer(true);
       if (completedBuffer) {
         if (isStandaloneMode) {
@@ -829,7 +884,11 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
       setChallengeState('idle');
       challengeStateRef.current = 'idle';
       if (isStandaloneMode) {
-        setTimeout(() => startNextChallengeRef.current?.(), 1500);
+        console.log('🔄 Preparando para iniciar próximo desafio em modo standalone');
+        setTimeout(() => {
+          console.log('🔄 Iniciando próximo desafio em modo standalone');
+          startNextChallengeRef.current?.();
+        }, 1500);
       } else {
         setTimeout(() => {
           send({ type: 'feedback', status: 'continue' });
@@ -1224,12 +1283,16 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
                   console.log("👁️ Gesto analisado:", {
                     challengeType: dbgCurrent.type,
                     gestureDetected,
-                    challengeCompleted: dbgCompleted
+                    challengeCompleted: dbgCompleted,
+                    isStandaloneMode,
+                    standaloneInitialized: standaloneInitialized.current
                   });
                   
                   if (gestureDetected && !dbgCompleted) {
                     console.log("✅ Gesto detectado! Completando desafio...");
                     completeCurrentChallenge();
+                  } else if (!gestureDetected) {
+                    console.log("⚠️ Gesto não detectado para desafio:", dbgCurrent.type);
                   }
                 } else {
                   console.log("⚠️ Condições não atendidas para análise:", {
