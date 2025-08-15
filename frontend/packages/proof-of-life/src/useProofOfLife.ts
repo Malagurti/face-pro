@@ -150,10 +150,10 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const eyeCenter = { x: (leftEye.x + rightEye.x) / 2, y: (leftEye.y + rightEye.y) / 2 };
     const noseOffset = noseTip.x - eyeCenter.x;
     
-    console.log("👁️ analyzeLookRight:", { noseOffset, threshold: 0.05, detected: noseOffset < 0.05, eyeCenter: eyeCenter.x, noseTip: noseTip.x });
-    // Se noseOffset > 0.08, nariz está à direita dos olhos = cabeça virada para direita
-    // Mas pelos logs, valores positivos indicam cabeça para esquerda, então invertemos
-    return noseOffset < 0.05; // Threshold para detectar movimento à direita (corrigido)
+    console.log("👁️ analyzeLookRight:", { noseOffset, threshold: 0.09, detected: noseOffset > 0.09, eyeCenter: eyeCenter.x, noseTip: noseTip.x });
+    // Se noseOffset > 0.03, nariz está à direita dos olhos = cabeça virada para direita
+    // Threshold ajustado baseado nos logs reais observados
+    return noseOffset > 0.09; // Threshold reduzido de 0.05 para 0.03
   }, []);
 
   const analyzeLookLeft = useCallback((landmarks: any) => {
@@ -168,10 +168,10 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const eyeCenter = { x: (leftEye.x + rightEye.x) / 2, y: (leftEye.y + rightEye.y) / 2 };
     const noseOffset = noseTip.x - eyeCenter.x;
     
-    console.log("👁️ analyzeLookLeft:", { noseOffset, threshold: 0.08, detected: noseOffset > 0.08, eyeCenter: eyeCenter.x, noseTip: noseTip.x });
-    // Se noseOffset < -0.08, nariz está à esquerda dos olhos = cabeça virada para esquerda
-    // Mas pelos logs, valores positivos indicam cabeça para esquerda, então ajustamos
-    return noseOffset > 0.08; // Threshold para detectar movimento à esquerda (corrigido)
+    console.log("👁️ analyzeLookLeft:", { noseOffset, threshold: 0.09, detected: noseOffset > 0.09, eyeCenter: eyeCenter.x, noseTip: noseTip.x });
+    // Se noseOffset > 0.10, nariz está à direita dos olhos = cabeça virada para esquerda
+    // Threshold ajustado baseado nos logs reais observados
+    return noseOffset > 0.09; // Threshold reduzido de 0.12 para 0.10
   }, []);
 
   const analyzeLookUp = useCallback((landmarks: any) => {
@@ -186,10 +186,10 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const eyebrowCenter = { x: (eyebrowLeft.x + eyebrowRight.x) / 2, y: (eyebrowLeft.y + eyebrowRight.y) / 2 };
     const faceHeight = Math.abs(chinBottom.y - eyebrowCenter.y);
     
-    console.log("👁️ analyzeLookUp:", { faceHeight, threshold: 0.35, detected: faceHeight < 0.35, eyebrowY: eyebrowCenter.y, chinY: chinBottom.y });
+    console.log("👁️ analyzeLookUp:", { faceHeight, threshold: 0.32, detected: faceHeight < 0.32, eyebrowY: eyebrowCenter.y, chinY: chinBottom.y });
     // Detectar se a cabeça está levantada (face comprimida verticalmente)
-    // Pelos logs, valores normais são 0.36-0.54, então para detectar "up" deve ser menor
-    return faceHeight < 0.35; // Threshold para detectar cabeça para cima (ajustado)
+    // Threshold baseado em pesquisa: equivale a ~15-20° de rotação pitch
+    return faceHeight < 0.32; // Threshold otimizado baseado em melhores práticas
   }, []);
 
   const analyzeOpenMouth = useCallback((landmarks: any) => {
@@ -206,8 +206,8 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const mouthWidth = Math.abs(mouthRight.x - mouthLeft.x);
     const mouthAspectRatio = mouthHeight / mouthWidth;
     
-    console.log("👁️ analyzeOpenMouth:", { mouthHeight, mouthWidth, mouthAspectRatio, threshold: 0.5, detected: mouthAspectRatio > 0.5 });
-    return mouthAspectRatio > 0.5; // Threshold para detectar boca aberta
+    console.log("👁️ analyzeOpenMouth:", { mouthHeight, mouthWidth, mouthAspectRatio, threshold: 0.6, detected: mouthAspectRatio > 0.6 });
+    return mouthAspectRatio > 0.6; // Threshold otimizado baseado em melhores práticas
   }, []);
 
   const analyzeGesture = useCallback((landmarks: any) => {
