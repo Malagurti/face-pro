@@ -355,7 +355,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             let _ = socket.close().await;
             return;
         }
-        let ack = ServerMessage::HelloAck { challenges: &["blink", "open-mouth", "turn-left", "turn-right", "head-up", "head-down"] };
+        let ack = ServerMessage::HelloAck { challenges: &["open-mouth", "turn-left", "turn-right", "head-up"] };
         let payload = serde_json::to_string(&ack).unwrap();
         if socket.send(Message::Text(payload)).await.is_err() { return; }
     } else {
@@ -371,13 +371,13 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     let min_frame_interval = Duration::from_millis(1000 / max_fps as u64);
     let mut last_frame_at: Option<Instant> = None;
 
-    // Initial prompt
+    // Initial prompt (restricted to supported kinds by current frontend)
     {
-        let prompt = ServerMessage::Prompt { challenge: protocol::PromptChallenge { id: "c1", kind: ChallengeKind::Blink, timeout_ms: 5000 } };
+        let prompt = ServerMessage::Prompt { challenge: protocol::PromptChallenge { id: "c1", kind: ChallengeKind::OpenMouth, timeout_ms: 5000 } };
         let _ = socket.send(Message::Text(serde_json::to_string(&prompt).unwrap())).await;
         let mut sessions = state.sessions.write().await;
         if let Some(s) = sessions.values_mut().next() {
-            s.fsm.state = FsmState::Prompting { challenge_id: "c1".to_string(), kind: ChallengeKind::Blink };
+            s.fsm.state = FsmState::Prompting { challenge_id: "c1".to_string(), kind: ChallengeKind::OpenMouth };
         }
     }
 
@@ -454,7 +454,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                                 let next_kind = {
                                                     use rand::seq::SliceRandom;
                                                     use rand::thread_rng;
-                                                    let mut all = vec![ChallengeKind::Blink, ChallengeKind::OpenMouth, ChallengeKind::TurnLeft, ChallengeKind::TurnRight, ChallengeKind::HeadUp, ChallengeKind::HeadDown];
+                                                    let mut all = vec![ChallengeKind::OpenMouth, ChallengeKind::TurnLeft, ChallengeKind::TurnRight, ChallengeKind::HeadUp];
                                                     all.retain(|k| k != kind);
                                                     let mut rng = thread_rng();
                                                     all.choose(&mut rng).cloned()

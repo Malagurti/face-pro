@@ -169,6 +169,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
   const buffersHistoryRef = useRef<ChallengeDataBuffer[]>([]);
   const [bufferingMode, setBufferingMode] = useState<boolean>(false);
   const bufferingModeRef = useRef<boolean>(false);
+  const prepareStartedAtRef = useRef<number>(0);
   const [bufferStats, setBufferStats] = useState<{
     currentFrames: number;
     currentSizeKB: number;
@@ -178,6 +179,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     currentSizeKB: 0,
     totalBuffers: 0
   });
+  const promptWatchdogRef = useRef<number | null>(null);
 
   useEffect(() => { currentChallengeRef.current = currentChallenge; }, [currentChallenge]);
   useEffect(() => { challengeStateRef.current = challengeState; }, [challengeState]);
@@ -819,12 +821,12 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
       }
     }
     
-    // Aguardar 2 segundos antes do próximo desafio
     setTimeout(() => {
-      console.log('🔄 Transição para idle e próximo desafio');
       setChallengeState('idle');
       challengeStateRef.current = 'idle';
-      startNextChallengeRef.current?.();
+      if (isStandaloneMode) {
+        startNextChallengeRef.current?.();
+      }
     }, 2000);
   };
 
@@ -1521,6 +1523,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
 
       preparingRef.current = true;
       readyCountRef.current = 0;
+      prepareStartedAtRef.current = performance.now();
       const prepareLoop = () => {
         if (!preparingRef.current) return;
         captureAndSendFrame();
@@ -1543,7 +1546,8 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
         if (readyCountRef.current % 10 === 0 && readyCountRef.current < requiredReadyFrames * 2) {
           log('info', `Ready count: ${readyCountRef.current}/${requiredReadyFrames}`, { detector: !!mpDetectorRef.current, face: !!facePresent, bypass: bypassValidation });
         }
-        if (readyCountRef.current >= requiredReadyFrames && !wsRef.current) {
+        const elapsedSincePrepare = performance.now() - prepareStartedAtRef.current;
+        if ((readyCountRef.current >= requiredReadyFrames || elapsedSincePrepare > 2000) && !wsRef.current) {
           log('info', `Conectando ao WebSocket: ${wsUrl}`);
           const ws = new WebSocket(wsUrl);
           wsRef.current = ws;
@@ -1560,27 +1564,25 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
                 setStatus("streaming");
                 preparingRef.current = false;
                 streamingRef.current = true;
-                
-                // Gerar primeiro desafio após 2 segundos de streaming
-                log('info', '🎯 Verificando se deve gerar desafio', { 
-                  enableLivenessChallenge, 
-                  bypassValidation, 
-                  shouldGenerate: enableLivenessChallenge && !bypassValidation 
-                });
-                
-                if (enableLivenessChallenge && !bypassValidation) {
-                  setTimeout(() => {
-                    log('info', '🎯 Tentando gerar primeiro desafio', { 
-                      streaming: streamingRef.current, 
-                      currentChallenge: !!currentChallenge 
-                    });
-                    if (streamingRef.current && !currentChallenge && challengeState === 'idle') {
-                      generateChallengeQueueRef.current();
-                      setTotalChallenges(0);
-                      startNextChallengeRef.current?.();
-                    }
-                  }, 2000);
+                log('info', '🎯 Aguardando desafios do backend');
+
+                if (promptWatchdogRef.current) {
+                  clearInterval(promptWatchdogRef.current);
+                  promptWatchdogRef.current = null;
                 }
+                promptWatchdogRef.current = window.setInterval(() => {
+                  if (!streamingRef.current) {
+                    if (promptWatchdogRef.current) {
+                      clearInterval(promptWatchdogRef.current);
+                      promptWatchdogRef.current = null;
+                    }
+                    return;
+                  }
+                  if (!currentChallengeRef.current && challengeStateRef.current === 'idle') {
+                    log('info', '🔔 Solicitando prompt ao backend');
+                    send({ type: 'feedback', status: 'continue' });
+                  }
+                }, 2000);
                 
                 const loop = () => {
                   const wso = wsRef.current;
@@ -1602,6 +1604,55 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
                 });
                 setLastPrompt(msg.challenge);
                 setStatus("prompt");
+                if (promptWatchdogRef.current) {
+                  clearInterval(promptWatchdogRef.current);
+                  promptWatchdogRef.current = null;
+                }
+
+                const kind = (msg.challenge?.kind || '').toString();
+                let mapped: 'look_right' | 'look_left' | 'look_up' | 'open_mouth' | null = null;
+                if (kind === 'look_right' || kind === 'turn-right' || kind === 'right') mapped = 'look_right';
+                else if (kind === 'look_left' || kind === 'turn-left' || kind === 'left') mapped = 'look_left';
+                else if (kind === 'look_up' || kind === 'head-up' || kind === 'up') mapped = 'look_up';
+                else if (kind === 'open_mouth' || kind === 'open-mouth' || kind === 'mouth') mapped = 'open_mouth';
+
+                if (!mapped || !msg.challenge?.id) {
+                  log('warn', '⚠️ Tipo de desafio desconhecido ou id ausente no prompt', msg.challenge);
+                  return;
+                }
+
+                const newChallenge = { id: msg.challenge.id, type: mapped } as { id: string; type: 'look_right' | 'look_left' | 'look_up' | 'open_mouth' };
+                setCurrentChallenge(newChallenge);
+                currentChallengeRef.current = newChallenge;
+                setChallengeCompleted(false);
+                challengeCompletedRef.current = false;
+                setChallengeState('active');
+                challengeStateRef.current = 'active';
+                setChallengeStartTime(Date.now());
+                setTotalChallenges(prev => prev + 1);
+
+                if (enableDataBuffering) {
+                  createChallengeBuffer(newChallenge);
+                  setBufferingMode(true);
+                  bufferingModeRef.current = true;
+                }
+
+                if (challengeTimeoutRef.current) {
+                  clearTimeout(challengeTimeoutRef.current);
+                }
+                const tmo = typeof msg.challenge?.timeoutMs === 'number' ? msg.challenge.timeoutMs : 15000;
+                challengeTimeoutRef.current = window.setTimeout(() => {
+                  log('warn', `⏰ Desafio ${newChallenge.type} expirou (backend)`);
+                  if (enableDataBuffering && currentBufferRef.current) {
+                    completeBuffer(false);
+                    clearCurrentBuffer();
+                    setBufferingMode(false);
+                    bufferingModeRef.current = false;
+                  }
+                  send({ type: 'feedback', status: 'fail' });
+                  setChallengeState('idle');
+                  challengeStateRef.current = 'idle';
+                }, tmo);
               } else if (msg.type === "throttle") {
                 if (typeof msg.maxFps === "number") {
                   setTargetFps((prev) => Math.min(prev, msg.maxFps));
@@ -1625,6 +1676,10 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
                 setStatus(msg.decision?.passed ? "passed" : "failed");
                 setLastPrompt(undefined); // Limpar prompt quando finalizar
                 streamingRef.current = false;
+                if (promptWatchdogRef.current) {
+                  clearInterval(promptWatchdogRef.current);
+                  promptWatchdogRef.current = null;
+                }
               }
             } catch {}
           };

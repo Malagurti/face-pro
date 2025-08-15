@@ -89,6 +89,18 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
     return "#374151";
   }, [status, currentChallenge, challengeCompleted]);
 
+  const guideType = useMemo(() => {
+    if (currentChallenge?.type) return currentChallenge.type;
+    const kind = lastPrompt?.kind;
+    if (!kind) return undefined;
+    const k = kind.toLowerCase();
+    if (k === 'look_right' || k === 'turn-right' || k === 'right') return 'look_right';
+    if (k === 'look_left' || k === 'turn-left' || k === 'left') return 'look_left';
+    if (k === 'look_up' || k === 'head-up' || k === 'up') return 'look_up';
+    if (k === 'open_mouth' || k === 'open-mouth' || k === 'mouth') return 'open_mouth';
+    return undefined;
+  }, [currentChallenge, lastPrompt]);
+
   const progress = useMemo(() => {
     if (status === "passed" || challengeState === 'completed') return 100;
     if (status === "failed") return 0;
@@ -187,7 +199,7 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
         <div style={maskStyle}>
           <video ref={vidRef} data-proof-of-life autoPlay playsInline muted width={700} height={500} style={{ objectFit: "cover", width: "100%", height: "100%" }} />
 
-          {currentChallenge && (
+          {(currentChallenge || lastPrompt) && (
             <div style={{ 
               position: "absolute", 
               bottom: 8, 
@@ -198,7 +210,11 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
               fontWeight: 600, 
               textShadow: "0 1px 2px rgba(0,0,0,0.6)" 
             }}>
-              {challengeCompleted ? "✅ Completado!" : `${getChallengeEmoji(currentChallenge.type)} ${getInstructionText(currentChallenge.type)}`}
+              {challengeCompleted 
+                ? "✅ Completado!" 
+                : guideType 
+                  ? `${getChallengeEmoji(guideType)} ${getInstructionText(guideType)}`
+                  : `🎯 ${lastPrompt?.kind}`}
             </div>
           )}
         </div>
@@ -255,7 +271,7 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
           </div>
         </div>
       )}
-      {currentChallenge && status !== "passed" && status !== "failed" && !props.bypassValidation && (
+      {(currentChallenge || lastPrompt) && status !== "passed" && status !== "failed" && !props.bypassValidation && (
         <div style={{ 
           fontSize: 16, 
           fontWeight: "bold", 
@@ -268,7 +284,13 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
           boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
           border: challengeCompleted ? "2px solid #10b981" : challengeState === 'transitioning' ? "2px solid #f59e0b" : "2px solid #3b82f6"
         }}>
-          {challengeCompleted ? "✅ Desafio Completado!" : challengeState === 'transitioning' ? "🔄 Preparando próximo..." : `🎯 ${getInstructionText(currentChallenge.type)}`}
+          {challengeCompleted 
+            ? "✅ Desafio Completado!" 
+            : challengeState === 'transitioning' 
+              ? "🔄 Preparando próximo..." 
+              : guideType 
+                ? `🎯 ${getInstructionText(guideType)}` 
+                : `🎯 ${lastPrompt?.kind}`}
           <div style={{ 
             fontSize: 12, 
             marginTop: "6px", 
