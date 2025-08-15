@@ -183,13 +183,7 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
   return (
     <div style={{ display: "grid", gap: 8 }}>
       <div style={containerStyle}>
-        <ProgressRing 
-          progress={progress} 
-          color={ringColor} 
-          width={380} 
-          height={500}
-          strokeWidth={6} 
-        />
+        {/* ProgressRing temporariamente removido - será usado depois */}
         <div style={maskStyle}>
           <video ref={vidRef} data-proof-of-life autoPlay playsInline muted width={700} height={500} style={{ objectFit: "cover", width: "100%", height: "100%" }} />
 
