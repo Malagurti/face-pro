@@ -135,6 +135,7 @@ Esses dados ajudam o backend a validar (MVP) enquanto a validação “forte” 
 - Vídeo não abre: verifique permissões do navegador (camera/mic) e `facingMode: "user"`.
 - Conexão WS cai: confirme `backendUrl`, CORS e limites de tamanho no backend.
 - Performance: reduza `frameRate`/resolução ou desabilite FaceDetector (`useFaceDetector: false`).
+- **Erro MediaPipe 404**: O SDK agora usa múltiplos fallbacks para os modelos de detecção facial. Se todos falharem, a detecção facial será desabilitada mas o SDK continuará funcionando para captura de frames.
 
 ## Licença
 

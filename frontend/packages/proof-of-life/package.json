@@ -1,6 +1,6 @@
 {
   "name": "@face-pro/proof-of-life",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "type": "module",
   "main": "dist/index.cjs",
   "module": "dist/index.js",
@@ -17,6 +17,9 @@
     "tslib": "2.6.3",
     "typescript": "5.5.4",
     "@types/react": "18.3.3"
+  },
+  "dependencies": {
+    "@mediapipe/tasks-vision": "0.10.14"
   }
 }
 

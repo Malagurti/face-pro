@@ -45,7 +45,14 @@ export function App() {
 
       {show && (
         <div className="card">
-          <ProofOfLife backendUrl={backendUrl} sessionId={sessionId} token={token} />
+          <ProofOfLife 
+            backendUrl={backendUrl} 
+            sessionId={sessionId} 
+            token={token} 
+            debug 
+            enablePositionGuide={true}
+            enableClientHeuristics={true}
+          />
         </div>
       )}
     </div>

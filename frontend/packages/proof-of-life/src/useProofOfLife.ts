@@ -9,9 +9,13 @@ export interface UseProofOfLifeOptions {
   videoConstraints?: MediaTrackConstraints;
   maxFps?: number;
   enableClientHeuristics?: boolean;
-  useFaceDetector?: boolean;
   minMotionScore?: number;
   phashIntervalFrames?: number;
+  enablePositionGuide?: boolean;
+  minFaceAreaRatio?: number;
+  maxFaceAreaRatio?: number;
+  centerTolerance?: number;
+  detectionIntervalFrames?: number;
 }
 
 export interface UseProofOfLifeResult {
@@ -24,10 +28,13 @@ export interface UseProofOfLifeResult {
   targetFps: number;
   throttled: boolean;
   lastAckAt?: number;
+  facePresent?: boolean;
+  faceBox?: { x: number; y: number; width: number; height: number };
+  guide?: { level: "ok" | "warn" | "error"; message?: string; reason?: string };
 }
 
 export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResult {
-  const { backendUrl, sessionId, token, videoConstraints, maxFps = 15, enableClientHeuristics = true, useFaceDetector = true, minMotionScore = 0.02, phashIntervalFrames = 5 } = opts;
+  const { backendUrl, sessionId, token, videoConstraints, maxFps = 15, enableClientHeuristics = true, minMotionScore = 0.02, phashIntervalFrames = 5, enablePositionGuide = true, minFaceAreaRatio = 0.12, maxFaceAreaRatio = 0.6, centerTolerance = 0.12, detectionIntervalFrames = 2 } = opts;
   const [status, setStatus] = useState<Status>("idle");
   const [lastPrompt, setLastPrompt] = useState<UseProofOfLifeResult["lastPrompt"]>();
   const [error, setError] = useState<string | undefined>();
@@ -41,9 +48,16 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
   const lastFrameAtRef = useRef<number>(0);
   const sendTimesRef = useRef<Map<number, number>>(new Map());
   const streamingRef = useRef<boolean>(false);
+  const preparingRef = useRef<boolean>(false);
+  const readyCountRef = useRef<number>(0);
   const lastSmallGrayRef = useRef<Uint8ClampedArray | null>(null);
   const frameCounterRef = useRef<number>(0);
-  const faceDetectorRef = useRef<any>(null);
+  const mpDetectorRef = useRef<any>(null);
+  const mpVisionRef = useRef<any>(null);
+  const [facePresent, setFacePresent] = useState<boolean | undefined>(undefined);
+  const [faceBox, setFaceBox] = useState<{ x: number; y: number; width: number; height: number } | undefined>(undefined);
+  const [guide, setGuide] = useState<{ level: "ok" | "warn" | "error"; message?: string; reason?: string } | undefined>(undefined);
+  const challengeCountRef = useRef<number>(0);
 
   const wsUrl = useMemo(() => backendUrl.replace(/^http/, "ws") + "/ws", [backendUrl]);
 
@@ -65,16 +79,20 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
         const x = xx * stepX;
         const y = yy * stepY;
         const i = (y * w + x) * 4;
-        const g = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0;
+        const r = data[i] ?? 0;
+        const gch = data[i + 1] ?? 0;
+        const b = data[i + 2] ?? 0;
+        const g = (r * 0.299 + gch * 0.587 + b * 0.114) | 0;
         gray[idx++] = g as number;
       }
     }
     let sum = 0;
-    for (let i = 0; i < gray.length; i++) sum += gray[i];
+    for (let i = 0; i < gray.length; i++) sum += (gray[i] ?? 0);
     const mean = sum / gray.length;
     let bitsBig = 0n;
     for (let i = 0; i < gray.length; i++) {
-      if (gray[i] >= mean) bitsBig |= 1n << BigInt(i);
+      const gv = gray[i] ?? 0;
+      if (gv >= mean) bitsBig |= 1n << BigInt(i);
     }
     return bitsBig.toString(16);
   };
@@ -90,7 +108,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const canvas = canvasRef.current;
     canvas.width = video.videoWidth || 320;
     canvas.height = video.videoHeight || 240;
-    const ctx = canvas.getContext("2d");
+    const ctx = (canvas.getContext("2d", { willReadFrequently: true } as any) || canvas.getContext("2d")) as CanvasRenderingContext2D | null;
     if (!ctx) return;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     if (enableClientHeuristics) {
@@ -105,7 +123,10 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
           const x = xx * stepX;
           const y = yy * stepY;
           const i = (y * w + x) * 4;
-          const g = (id.data[i] * 0.299 + id.data[i + 1] * 0.587 + id.data[i + 2] * 0.114) | 0;
+          const r = id.data[i] ?? 0;
+          const gch = id.data[i + 1] ?? 0;
+          const b = id.data[i + 2] ?? 0;
+          const g = (r * 0.299 + gch * 0.587 + b * 0.114) | 0;
           small[p++] = g as number;
         }
       }
@@ -114,7 +135,11 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
         const prev = lastSmallGrayRef.current;
         const len = Math.min(prev.length, small.length);
         let acc = 0;
-        for (let i = 0; i < len; i++) acc += Math.abs(prev[i] - small[i]) / 255;
+        for (let i = 0; i < len; i++) {
+          const pv = prev[i] ?? 0;
+          const sv = small[i] ?? 0;
+          acc += Math.abs(pv - sv) / 255;
+        }
         motionScore = acc / len;
       }
       lastSmallGrayRef.current = small;
@@ -125,108 +150,118 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
         ahashHex = computeAHash(id.data, w, h);
       }
 
-      const FaceDetectorCtor: any = (globalThis as any).FaceDetector;
-      if (useFaceDetector && FaceDetectorCtor) {
-        if (!faceDetectorRef.current) faceDetectorRef.current = new FaceDetectorCtor({ fastMode: true, maxDetectedFaces: 1 });
-        if (n % 2 === 0) {
+      if ((frameCounterRef.current % (detectionIntervalFrames || 2)) === 0) {
+        if (mpDetectorRef.current && mpVisionRef.current) {
           try {
-            void faceDetectorRef.current.detect(video).then((faces: any[]) => {
-              let facePresent: boolean | undefined;
-              let faceBox: { x: number; y: number; width: number; height: number } | undefined;
-              if (faces && faces.length > 0) {
-                const b = faces[0].boundingBox;
-                facePresent = true;
-                faceBox = { x: b.x, y: b.y, width: b.width, height: b.height };
-              } else {
-                facePresent = false;
+            const res = mpDetectorRef.current.detectForVideo(video, now);
+            let present = false;
+            let box: { x: number; y: number; width: number; height: number } | undefined;
+            if (res && res.detections && res.detections.length > 0) {
+              present = true;
+              const d = res.detections[0];
+              const bb = d.boundingBox;
+              box = { x: Math.round(bb.originX), y: Math.round(bb.originY), width: Math.round(bb.width), height: Math.round(bb.height) };
+              console.log("🔍 MediaPipe detectou face:", { present, box });
+            } else {
+              console.log("🔍 MediaPipe: nenhuma face detectada");
+            }
+            setFacePresent(present);
+            setFaceBox(box);
+            
+            if (enablePositionGuide) {
+              const vw = video.videoWidth || 320;
+              const vh = video.videoHeight || 240;
+              
+              if (!present) {
+                setGuide({ level: "error", message: "Posicione seu rosto na frente da câmera", reason: "no_face" });
+              } else if (box) {
+                const area = box.width * box.height;
+                const areaRatio = area / (vw * vh);
+                const cx = box.x + box.width / 2;
+                const cy = box.y + box.height / 2;
+                const dx = Math.abs(cx - vw / 2) / vw;
+                const dy = Math.abs(cy - vh / 2) / vh;
+                
+                if (areaRatio < minFaceAreaRatio) {
+                  setGuide({ level: "warn", message: "Aproxime-se da câmera", reason: "too_far" });
+                } else if (areaRatio > maxFaceAreaRatio) {
+                  setGuide({ level: "warn", message: "Afaste-se da câmera", reason: "too_close" });
+                } else if (dx > centerTolerance) {
+                  if (cx > vw / 2) {
+                    setGuide({ level: "warn", message: "Mova-se para a esquerda", reason: "face_right" });
+                  } else {
+                    setGuide({ level: "warn", message: "Mova-se para a direita", reason: "face_left" });
+                  }
+                } else if (dy > centerTolerance) {
+                  if (cy > vh / 2) {
+                    setGuide({ level: "warn", message: "Mova-se para cima", reason: "face_down" });
+                  } else {
+                    setGuide({ level: "warn", message: "Mova-se para baixo", reason: "face_up" });
+                  }
+                } else {
+                  setGuide({ level: "ok", message: "Posição perfeita!", reason: "centered" });
+                }
               }
-              const ws = wsRef.current;
-              if (ws && ws.readyState === WebSocket.OPEN) {
-                const tel: any = { type: "telemetry", facePresent };
-                if (faceBox) tel.faceBox = faceBox;
-                ws.send(JSON.stringify(tel));
-              }
-            }).catch(() => {});
-          } catch {}
+            }
+            
+
+          } catch (e) {
+            console.warn("Erro na detecção facial:", e);
+          }
+        } else {
+          console.log("🚫 MediaPipe detector não disponível:", { 
+            detector: !!mpDetectorRef.current, 
+            vision: !!mpVisionRef.current 
+          });
+          setFacePresent(undefined);
+          setFaceBox(undefined);
+          if (enablePositionGuide) {
+            setGuide({ level: "warn", message: "Detector facial não disponível - continue", reason: "no_detector" });
+          }
         }
       }
 
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      // Enviar telemetria apenas quando necessário (motion score significativo)
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && motionScore >= minMotionScore) {
         const tel: any = { type: "telemetry", motionScore };
         if (ahashHex) tel.ahash = ahashHex;
-        if (motionScore >= minMotionScore || ahashHex) {
-          wsRef.current.send(JSON.stringify(tel));
-        }
+        
+        console.log("📊 Telemetria enviada:", {
+          motionScore: tel.motionScore?.toFixed(4),
+          ahash: !!tel.ahash,
+          threshold: minMotionScore
+        });
+        wsRef.current.send(JSON.stringify(tel));
       }
     }
-    canvas.toBlob((blob) => {
-      if (!blob) return;
-      const ts = Date.now();
-      sendTimesRef.current.set(ts, performance.now());
-      const reader = new FileReader();
-      reader.onload = () => {
-        const arr = new Uint8Array(reader.result as ArrayBuffer);
-        const header = new Uint8Array(16);
-        header.set([0x46, 0x50, 0x46, 0x31]); // "FPF1"
-        header[4] = 1; // 1=jpeg
-        // bytes[5..7] reserved (zeros)
-        const view = new DataView(header.buffer);
-        view.setBigUint64(8, BigInt(ts), true); // little-endian
-        const packet = new Uint8Array(header.length + arr.length);
-        packet.set(header, 0);
-        packet.set(arr, header.length);
-        const ws = wsRef.current;
-        if (ws && ws.readyState === WebSocket.OPEN) ws.send(packet);
-      };
-      reader.readAsArrayBuffer(blob);
-    }, "image/jpeg", 0.7);
-  }, [enableClientHeuristics, maxFps, minMotionScore, phashIntervalFrames, send, targetFps, useFaceDetector]);
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      canvas.toBlob((blob) => {
+        if (!blob) return;
+        const ts = Date.now();
+        sendTimesRef.current.set(ts, performance.now());
+        const reader = new FileReader();
+        reader.onload = () => {
+          const arr = new Uint8Array(reader.result as ArrayBuffer);
+          const header = new Uint8Array(16);
+          header.set([0x46, 0x50, 0x46, 0x31]);
+          header[4] = 1;
+          const view = new DataView(header.buffer);
+          view.setBigUint64(8, BigInt(ts), true);
+          const packet = new Uint8Array(header.length + arr.length);
+          packet.set(header, 0);
+          packet.set(arr, header.length);
+          const ws2 = wsRef.current;
+          if (ws2 && ws2.readyState === WebSocket.OPEN) ws2.send(packet);
+        };
+        reader.readAsArrayBuffer(blob);
+      }, "image/jpeg", 0.7);
+    }
+  }, [enableClientHeuristics, maxFps, minMotionScore, phashIntervalFrames, send, targetFps, detectionIntervalFrames]);
 
   const start = useCallback(async () => {
     setError(undefined);
     setStatus("connecting");
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ type: "hello", sessionId, token, client: { sdkVersion: "0.0.1", platform: "web" } }));
-    };
-    ws.onmessage = (ev) => {
-      try {
-        const msg = JSON.parse(ev.data);
-        if (msg.type === "helloAck") {
-          setStatus("streaming");
-          streamingRef.current = true;
-          const loop = () => {
-            if (!streamingRef.current || ws.readyState !== WebSocket.OPEN) return;
-            captureAndSendFrame();
-            requestAnimationFrame(loop);
-          };
-          requestAnimationFrame(loop);
-        } else if (msg.type === "prompt") {
-          setLastPrompt(msg.challenge);
-          setStatus("prompt");
-        } else if (msg.type === "throttle") {
-          if (typeof msg.maxFps === "number") {
-            setTargetFps((prev) => Math.min(prev, msg.maxFps));
-            setThrottled(true);
-            setTimeout(() => setThrottled(false), 1500);
-          }
-        } else if (msg.type === "frameAck") {
-          const sentAt = sendTimesRef.current.get(msg.ts);
-          if (sentAt) {
-            const rtt = Math.round(performance.now() - sentAt);
-            setRttMs(rtt);
-            send({ type: "telemetry", rttMs: rtt });
-            sendTimesRef.current.delete(msg.ts);
-          }
-          setLastAckAt(Date.now());
-        } else if (msg.type === "result") {
-          setStatus(msg.decision?.passed ? "passed" : "failed");
-          streamingRef.current = false;
-        }
-      } catch {}
-    };
-    ws.onerror = () => setError("ws-error");
 
     try {
       const defaultConstraints: MediaStreamConstraints = {
@@ -242,6 +277,145 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
       mediaStreamRef.current = ms;
       const video = document.querySelector("video[data-proof-of-life]") as HTMLVideoElement | null;
       if (video) video.srcObject = ms;
+      try {
+        await (async () => {
+          const mod: any = await import("@mediapipe/tasks-vision");
+          const fileset = await mod.FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+          mpVisionRef.current = mod;
+          
+          const modelPaths = [
+            "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite",
+            "https://storage.googleapis.com/mediapipe-assets/face_detection_short_range.tflite",
+            "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/models/face_detection_short_range.tflite"
+          ];
+          
+          let detector = null;
+          for (const modelPath of modelPaths) {
+            try {
+              detector = await mod.FaceDetector.createFromOptions(fileset, { 
+                baseOptions: { modelAssetPath: modelPath }, 
+                runningMode: "VIDEO" 
+              });
+              break;
+            } catch (e) {
+              console.warn(`Falha ao carregar modelo de ${modelPath}:`, e);
+            }
+          }
+          
+          if (!detector) {
+            console.warn("❌ Nenhum modelo de detecção facial pôde ser carregado. Detecção facial será desabilitada.");
+          } else {
+            console.log("✅ MediaPipe detector carregado com sucesso!");
+          }
+          
+          mpDetectorRef.current = detector;
+        })();
+      } catch (e) {
+        console.warn("Erro ao inicializar MediaPipe:", e);
+      }
+
+      preparingRef.current = true;
+      readyCountRef.current = 0;
+      const prepareLoop = () => {
+        if (!preparingRef.current) return;
+        captureAndSendFrame();
+        const v = document.querySelector("video[data-proof-of-life]") as HTMLVideoElement | null;
+        const vw = v?.videoWidth || 320;
+        const vh = v?.videoHeight || 240;
+        let okNow = false;
+        
+        if (mpDetectorRef.current && facePresent && faceBox) {
+          const area = faceBox.width * faceBox.height;
+          const areaRatio = area / (vw * vh);
+          const cx = faceBox.x + faceBox.width / 2;
+          const cy = faceBox.y + faceBox.height / 2;
+          const dx = Math.abs(cx - vw / 2) / vw;
+          const dy = Math.abs(cy - vh / 2) / vh;
+          okNow = areaRatio >= minFaceAreaRatio && areaRatio <= maxFaceAreaRatio && Math.max(dx, dy) <= centerTolerance;
+          
+          if (okNow) {
+            readyCountRef.current += 1;
+          } else {
+            readyCountRef.current = 0;
+          }
+        } else {
+          readyCountRef.current += 1;
+        }
+        
+        const requiredReadyFrames = mpDetectorRef.current ? 12 : 5; // Mais frames para estabilidade
+        if (readyCountRef.current % 10 === 0) {
+          console.log(`Ready count: ${readyCountRef.current}/${requiredReadyFrames}, detector: ${!!mpDetectorRef.current}, face: ${!!facePresent}`);
+        }
+        if (readyCountRef.current >= requiredReadyFrames && !wsRef.current) {
+          console.log(`Conectando ao WebSocket: ${wsUrl}`);
+          const ws = new WebSocket(wsUrl);
+          wsRef.current = ws;
+          ws.onopen = () => {
+            console.log("WebSocket conectado, enviando hello");
+            ws.send(JSON.stringify({ type: "hello", sessionId, token, client: { sdkVersion: "0.0.2", platform: "web" } }));
+          };
+          ws.onmessage = (ev) => {
+            try {
+              const msg = JSON.parse(ev.data);
+              console.log("Mensagem recebida do WebSocket:", JSON.stringify(msg, null, 2));
+              if (msg.type === "helloAck") {
+                console.log("HelloAck recebido, iniciando streaming");
+                setStatus("streaming");
+                preparingRef.current = false;
+                streamingRef.current = true;
+                const loop = () => {
+                  const wso = wsRef.current;
+                  if (!streamingRef.current || !wso || wso.readyState !== WebSocket.OPEN) return;
+                  captureAndSendFrame();
+                  requestAnimationFrame(loop);
+                };
+                requestAnimationFrame(loop);
+              } else if (msg.type === "prompt") {
+                challengeCountRef.current += 1;
+                console.log(`🎯 Desafio ${challengeCountRef.current} recebido:`, {
+                  id: msg.challenge?.id,
+                  kind: msg.challenge?.kind,
+                  timeout: msg.challenge?.timeoutMs
+                });
+                setLastPrompt(msg.challenge);
+                setStatus("prompt");
+              } else if (msg.type === "throttle") {
+                if (typeof msg.maxFps === "number") {
+                  setTargetFps((prev) => Math.min(prev, msg.maxFps));
+                  setThrottled(true);
+                  setTimeout(() => setThrottled(false), 1500);
+                }
+              } else if (msg.type === "frameAck") {
+                const sentAt = sendTimesRef.current.get(msg.ts);
+                if (sentAt) {
+                  const rtt = Math.round(performance.now() - sentAt);
+                  setRttMs(rtt);
+                  send({ type: "telemetry", rttMs: rtt });
+                  sendTimesRef.current.delete(msg.ts);
+                }
+                setLastAckAt(Date.now());
+                if (msg.face || msg.pad) {
+                  console.log("FrameAck com dados adicionais:", { face: msg.face, pad: msg.pad });
+                }
+              } else if (msg.type === "result") {
+                console.log("Resultado recebido:", msg.decision);
+                setStatus(msg.decision?.passed ? "passed" : "failed");
+                setLastPrompt(undefined); // Limpar prompt quando finalizar
+                streamingRef.current = false;
+              }
+            } catch {}
+          };
+          ws.onerror = (error) => {
+            console.error("Erro no WebSocket:", error);
+            setError("ws-error");
+          };
+          ws.onclose = (event) => {
+            console.log("WebSocket fechado:", event.code, event.reason);
+          };
+        }
+        requestAnimationFrame(prepareLoop);
+      };
+      requestAnimationFrame(prepareLoop);
     } catch (e: any) {
       const name = e?.name || "getUserMediaError";
       setError(name);
@@ -259,7 +433,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     setStatus("idle");
   }, []);
 
-  return { status, start, stop, lastPrompt, error, rttMs, targetFps, throttled, lastAckAt };
+  return { status, start, stop, lastPrompt, error, rttMs, targetFps, throttled, lastAckAt, facePresent, faceBox, guide };
 }
 
 

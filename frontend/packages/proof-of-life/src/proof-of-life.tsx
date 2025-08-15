@@ -1,6 +1,18 @@
 import React, { useEffect, useMemo, useRef } from "react";
 import { useProofOfLife, UseProofOfLifeOptions } from "./useProofOfLife";
 
+function getInstructionText(challenge: string): string {
+  switch (challenge) {
+    case "blink": return "Pisque os olhos naturalmente";
+    case "open-mouth": return "Abra a boca";
+    case "turn-left": return "Vire a cabeça para a esquerda";
+    case "turn-right": return "Vire a cabeça para a direita";
+    case "head-up": return "Levante a cabeça";
+    case "head-down": return "Abaixe a cabeça";
+    default: return challenge;
+  }
+}
+
 export type ProofOfLifeProps = UseProofOfLifeOptions & {
   onResult?: (passed: boolean) => void;
   onError?: (err: string) => void;
@@ -9,15 +21,18 @@ export type ProofOfLifeProps = UseProofOfLifeOptions & {
 
 export function ProofOfLife(props: ProofOfLifeProps) {
   const vidRef = useRef<HTMLVideoElement>(null);
-  const { status, start, stop, lastPrompt, error, rttMs, throttled, targetFps, lastAckAt } = useProofOfLife(props);
+  const { status, start, stop, lastPrompt, error, rttMs, throttled, targetFps, lastAckAt, faceBox, guide } = useProofOfLife(props);
   const debug = props.debug ?? false;
 
   const ringColor = useMemo(() => {
-    if (status === "passed") return "#10b981"; // green
-    if (status === "failed") return "#ef4444"; // red
-    if (status === "prompt") return "#f59e0b"; // amber
-    return "#374151"; // gray
-  }, [status]);
+    if (status === "passed") return "#10b981";
+    if (status === "failed") return "#ef4444";
+    if (guide?.level === "ok") return "#3b82f6";
+    if (guide?.level === "warn") return "#f59e0b";
+    if (guide?.level === "error") return "#ef4444";
+    if (status === "prompt") return "#f59e0b";
+    return "#374151";
+  }, [status, guide]);
 
   useEffect(() => {
     start();
@@ -61,12 +76,45 @@ export function ProofOfLife(props: ProofOfLifeProps) {
     <div style={{ display: "grid", gap: 8 }}>
       <div style={maskStyle}>
         <video ref={vidRef} data-proof-of-life autoPlay playsInline muted width={240} height={320} style={{ objectFit: "cover", width: "100%", height: "100%" }} />
+
+        {guide && guide.message && (
+          <div style={{ position: "absolute", bottom: 8, left: 8, right: 8, textAlign: "center", color: guide.level === "ok" ? "#3b82f6" : guide.level === "warn" ? "#f59e0b" : "#ef4444", fontWeight: 600, textShadow: "0 1px 2px rgba(0,0,0,0.6)" }}>{guide.message}</div>
+        )}
       </div>
       {debug && (<div>status: {status} {throttled ? <span style={{ color: "#f59e0b" }}>(throttle)</span> : null}</div>)}
       {debug && (<div style={{ fontSize: 12, color: "#9ca3af" }}>targetFps: {targetFps}{rttMs !== undefined ? ` · rtt: ${rttMs}ms` : ""}{lastAckAt ? ` · last: ${new Date(lastAckAt).toLocaleTimeString()}` : ""}</div>)}
-      {promptText && (
-        <div style={{ fontSize: 14 }}>
-          Guia: {promptText}
+      {promptText && status !== "passed" && status !== "failed" && (
+        <div style={{ 
+          fontSize: 16, 
+          fontWeight: "bold", 
+          padding: "12px",
+          backgroundColor: "rgba(0,0,0,0.8)",
+          color: "white",
+          borderRadius: "12px",
+          textAlign: "center",
+          margin: "10px 0",
+          boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+          border: "2px solid #3b82f6"
+        }}>
+          🎯 {getInstructionText(promptText)}
+          <div style={{ 
+            fontSize: 12, 
+            marginTop: "6px", 
+            opacity: 0.8,
+            color: "#93c5fd"
+          }}>
+            Execute o movimento solicitado
+          </div>
+        </div>
+      )}
+      {status === "passed" && (
+        <div style={{ fontSize: 14, color: "#10b981", fontWeight: "bold" }}>
+          ✅ Prova de vida concluída com sucesso!
+        </div>
+      )}
+      {status === "failed" && (
+        <div style={{ fontSize: 14, color: "#ef4444", fontWeight: "bold" }}>
+          ❌ Prova de vida falhou
         </div>
       )}
       {debug && error && <div style={{ color: "red" }}>{error}</div>}
