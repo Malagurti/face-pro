@@ -106,6 +106,10 @@ struct TelemetryState {
     turn_left_hits: u32,
     turn_right_hits: u32,
     motion_hits: u32,
+    #[serde(skip_serializing)]
+    motion_scores: Vec<f32>,  // Para análise de padrões
+    #[serde(skip_serializing)]
+    face_positions: Vec<(f32, f32)>, // Para análise de movimento facial
 }
 
 impl TelemetryState {
@@ -115,6 +119,72 @@ impl TelemetryState {
         self.motion_hits = 0;
         self.last_cx = None;
         self.last_w = None;
+        self.motion_scores.clear();
+        self.face_positions.clear();
+    }
+    
+    fn add_motion_score(&mut self, score: f32) {
+        self.motion_scores.push(score);
+        // Manter apenas últimos 30 scores (2 segundos @ 15fps)
+        if self.motion_scores.len() > 30 {
+            self.motion_scores.remove(0);
+        }
+    }
+    
+    fn add_face_position(&mut self, x: f32, y: f32) {
+        self.face_positions.push((x, y));
+        // Manter apenas últimas 30 posições
+        if self.face_positions.len() > 30 {
+            self.face_positions.remove(0);
+        }
+    }
+    
+    // Validação específica para blink: requer spike de motion seguido de queda
+    fn has_significant_motion(&self) -> bool {
+        if self.motion_scores.len() < 10 { return false; }
+        
+        // Procurar por pico de movimento (spike pattern típico de blink)
+        let recent = &self.motion_scores[self.motion_scores.len()-10..];
+        let max_score = recent.iter().fold(0.0f32, |acc, &x| acc.max(x));
+        let avg_score = recent.iter().sum::<f32>() / recent.len() as f32;
+        
+        // Deve ter um pico pelo menos 3x maior que a média
+        max_score > 0.05 && max_score > avg_score * 3.0
+    }
+    
+    // Validação para facial motion (boca, expressões)
+    fn has_facial_motion(&self) -> bool {
+        if self.motion_scores.len() < 15 { return false; }
+        
+        let recent = &self.motion_scores[self.motion_scores.len()-15..];
+        let avg_motion = recent.iter().sum::<f32>() / recent.len() as f32;
+        
+        // Movimento facial sustentado (como abrir boca)
+        avg_motion > 0.04 && recent.iter().filter(|&&x| x > 0.03).count() >= 8
+    }
+    
+    // Validação para turn movements
+    fn validate_turn_movement(&self) -> bool {
+        if self.face_positions.len() < 20 { return false; }
+        
+        let start_pos = self.face_positions[0];
+        let end_pos = self.face_positions[self.face_positions.len()-1];
+        
+        // Movimento horizontal significativo
+        let horizontal_displacement = (end_pos.0 - start_pos.0).abs();
+        horizontal_displacement > 15.0 // pixels de movimento mínimo
+    }
+    
+    // Validação para head movements (up/down)
+    fn validate_head_movement(&self) -> bool {
+        if self.face_positions.len() < 20 { return false; }
+        
+        let start_pos = self.face_positions[0];
+        let end_pos = self.face_positions[self.face_positions.len()-1];
+        
+        // Movimento vertical significativo
+        let vertical_displacement = (end_pos.1 - start_pos.1).abs();
+        vertical_displacement > 10.0 // pixels de movimento mínimo
     }
 }
 
@@ -308,38 +378,64 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                             let mut sessions = state.sessions.write().await;
                             if let Some(s) = sessions.values_mut().next() {
                                 // Heurística de movimento
-                                if let Some(ms) = tel.motion_score { if ms >= 0.02 { s.tele.motion_hits = s.tele.motion_hits.saturating_add(1); } }
-                                // Heurística de turn usando deslocamento de bbox quando disponível
-                                if let Some(b) = tel.face_box.as_ref() {
-                                    let cx = b.x + b.width * 0.5;
-                                    if let Some(prev_cx) = s.tele.last_cx {
-                                        let dx = cx - prev_cx;
-                                        let wref = s.tele.last_w.unwrap_or(b.width.max(1.0));
-                                        let rel = dx / wref.max(1.0);
-                                        if rel <= -0.15 { s.tele.turn_left_hits = s.tele.turn_left_hits.saturating_add(1); }
-                                        if rel >= 0.15 { s.tele.turn_right_hits = s.tele.turn_right_hits.saturating_add(1); }
+                                if let Some(ms) = tel.motion_score { 
+                                    s.tele.add_motion_score(ms);
+                                    if ms >= 0.02 { 
+                                        s.tele.motion_hits = s.tele.motion_hits.saturating_add(1); 
                                     }
-                                    s.tele.last_cx = Some(cx);
-                                    s.tele.last_w = Some(b.width);
+                                }
+                                // Usar dados de face do backend ONNX para turn detection
+                                // Será implementado quando frameAck.face estiver disponível na telemetria
+                                // Por enquanto, turn-left/right usarão motion_hits como fallback
+
+                                // Debug: mostrar estado atual periodicamente
+                                if s.tele.motion_hits % 10 == 0 {
+                                    println!("🔍 Debug: motion_hits={}, motion_scores={}, face_positions={}", 
+                                        s.tele.motion_hits, s.tele.motion_scores.len(), s.tele.face_positions.len());
                                 }
 
                                 // FSM: validar automaticamente desafios simples quando recebemos sinais suficientes
                                 match &mut s.fsm.state {
                                     FsmState::Prompting { challenge_id, kind } => {
                                         let ok = match kind {
-                                            ChallengeKind::Blink => s.tele.motion_hits >= 2,
-                                            ChallengeKind::OpenMouth => s.tele.motion_hits >= 2,
-                                            ChallengeKind::TurnLeft => s.tele.turn_left_hits >= 2,
-                                            ChallengeKind::TurnRight => s.tele.turn_right_hits >= 2,
-                                            ChallengeKind::HeadUp => s.tele.motion_hits >= 2,
-                                            ChallengeKind::HeadDown => s.tele.motion_hits >= 2,
+                                            // Blink: Requer motion significativo + análise específica
+                                            ChallengeKind::Blink => {
+                                                s.tele.motion_hits >= 10 && 
+                                                s.tele.has_significant_motion()
+                                            },
+                                            // OpenMouth: Requer motion muito alto
+                                            ChallengeKind::OpenMouth => {
+                                                s.tele.motion_hits >= 15 &&
+                                                s.tele.has_facial_motion()
+                                            },
+                                            // Turn movements: Requer análise de face + motion alto
+                                            ChallengeKind::TurnLeft => {
+                                                s.tele.motion_hits >= 20 &&
+                                                s.tele.validate_turn_movement()
+                                            },
+                                            ChallengeKind::TurnRight => {
+                                                s.tele.motion_hits >= 20 &&
+                                                s.tele.validate_turn_movement()
+                                            },
+                                            // Head movements: Requer motion muito alto
+                                            ChallengeKind::HeadUp => {
+                                                s.tele.motion_hits >= 25 &&
+                                                s.tele.validate_head_movement()
+                                            },
+                                            ChallengeKind::HeadDown => {
+                                                s.tele.motion_hits >= 25 &&
+                                                s.tele.validate_head_movement()
+                                            },
                                         };
                                         if ok {
                                             s.fsm.completed += 1;
+                                            println!("✅ Desafio {} ({:?}) concluído! ({}/3) - motion_hits: {}", 
+                                                challenge_id, kind, s.fsm.completed, s.tele.motion_hits);
                                             s.tele.reset();
                                             if s.fsm.completed >= 3 {
                                                 s.fsm.state = FsmState::Passed;
                                                 done = true;
+                                                println!("🎉 Todos os 3 desafios concluídos! Proof of life PASSED");
                                             } else {
                                                 let next_kind = {
                                                     use rand::seq::SliceRandom;
@@ -350,10 +446,12 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                                     all.choose(&mut rng).cloned()
                                                 };
                                                 if let Some(nk) = next_kind {
-                                                    let next = ServerMessage::Prompt { challenge: protocol::PromptChallenge { id: "cX", kind: nk.clone(), timeout_ms: 5000 } };
+                                                    let next_id = format!("c{}", s.fsm.completed + 1);
+                                                    let next = ServerMessage::Prompt { challenge: protocol::PromptChallenge { id: &next_id, kind: nk.clone(), timeout_ms: 5000 } };
+                                                    println!("🎯 Enviando próximo desafio: {:?} ({})", nk, next_id);
                                                     let _ = socket.send(Message::Text(serde_json::to_string(&next).unwrap())).await;
                                                     *kind = nk;
-                                                    *challenge_id = "cX".to_string();
+                                                    *challenge_id = next_id;
                                                 }
                                             }
                                         }
@@ -503,6 +601,16 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         if let Some(det) = state.inference.scrfd.as_ref() {
                             let faces = det.detect(&buf, w as usize, h as usize);
                             if let Some(f) = faces.into_iter().max_by(|a,b| a.score.total_cmp(&b.score)) {
+                                // Armazenar posição facial para análise de movimento
+                                let center_x = (f.x1 + f.x2) / 2.0;
+                                let center_y = (f.y1 + f.y2) / 2.0;
+                                
+                                // Adicionar à telemetria da sessão
+                                let mut sessions = state.sessions.write().await;
+                                if let Some(s) = sessions.values_mut().next() {
+                                    s.tele.add_face_position(center_x, center_y);
+                                }
+                                
                                 res = Some(protocol::FaceDebug { x1: f.x1, y1: f.y1, x2: f.x2, y2: f.y2, score: f.score });
                             }
                         }
