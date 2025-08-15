@@ -77,7 +77,7 @@ const ProgressRing: React.FC<ProgressRingProps> = ({ progress, color, width, hei
 export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifeProps) {
   const vidRef = useRef<HTMLVideoElement>(null);
   const componentMountedRef = useRef(false);
-  const { status, start, stop, lastPrompt, error, rttMs, throttled, targetFps, lastAckAt, faceBox, currentChallenge, challengeCompleted, standaloneMode, challengeStartTime, challengeState, totalChallenges, maxChallenges } = useProofOfLife(props);
+  const { status, start, stop, lastPrompt, error, rttMs, throttled, targetFps, lastAckAt, faceBox, currentChallenge, challengeCompleted, standaloneMode, challengeStartTime, challengeState, totalChallenges, maxChallenges, bufferingMode, bufferStats } = useProofOfLife(props);
   const debug = props.debug ?? false;
 
   const ringColor = useMemo(() => {
@@ -206,6 +206,7 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
       {debug && (<div>status: {status} {throttled ? <span style={{ color: "#f59e0b" }}>(throttle)</span> : null}</div>)}
       {debug && (<div style={{ fontSize: 12, color: "#9ca3af" }}>targetFps: {targetFps}{rttMs !== undefined ? ` · rtt: ${rttMs}ms` : ""}{lastAckAt ? ` · last: ${new Date(lastAckAt).toLocaleTimeString()}` : ""}</div>)}
       {debug && (<div style={{ fontSize: 12, color: "#9ca3af" }}>challenge: {currentChallenge?.type || 'none'} · state: {challengeState || 'idle'} · progress: {totalChallenges || 0}/{maxChallenges || 3} · completed: {challengeCompleted ? 'yes' : 'no'} · bypass: {props.bypassValidation ? 'yes' : 'no'} · standalone: {standaloneMode ? 'yes' : 'no'}</div>)}
+      {debug && bufferingMode && (<div style={{ fontSize: 12, color: "#f59e0b" }}>📦 BUFFER: {bufferStats?.currentFrames || 0} frames · {(bufferStats?.currentSizeKB || 0).toFixed(2)}KB · total: {bufferStats?.totalBuffers || 0}</div>)}
       {props.bypassValidation && status === "streaming" && (
         <div style={{ 
           fontSize: 16, 
@@ -275,6 +276,30 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
             color: challengeCompleted ? "#6ee7b7" : challengeState === 'transitioning' ? "#fbbf24" : "#93c5fd"
           }}>
             {challengeCompleted ? `Desafio ${totalChallenges || 0}/${maxChallenges || 3} completo` : challengeState === 'transitioning' ? "Aguarde..." : "Execute o movimento solicitado"}
+          </div>
+        </div>
+      )}
+      {bufferingMode && !props.bypassValidation && !standaloneMode && (
+        <div style={{ 
+          fontSize: 14, 
+          fontWeight: "bold", 
+          padding: "8px",
+          backgroundColor: "rgba(245, 158, 11, 0.8)",
+          color: "white",
+          borderRadius: "8px",
+          textAlign: "center",
+          margin: "8px 0",
+          boxShadow: "0 2px 8px rgba(0,0,0,0.2)",
+          border: "1px solid #f59e0b"
+        }}>
+          📦 Armazenando dados localmente
+          <div style={{ 
+            fontSize: 11, 
+            marginTop: "4px", 
+            opacity: 0.9,
+            color: "#fbbf24"
+          }}>
+            {bufferStats?.currentFrames || 0} frames ({(bufferStats?.currentSizeKB || 0).toFixed(1)}KB)
           </div>
         </div>
       )}

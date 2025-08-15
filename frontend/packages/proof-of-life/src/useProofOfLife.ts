@@ -2,6 +2,37 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 type Status = "idle" | "connecting" | "prompt" | "streaming" | "passed" | "failed";
 
+interface ChallengeFrameData {
+  timestamp: number;
+  frameId: number;
+  imageData?: string;
+  motionScore?: number;
+  ahash?: string;
+  landmarks?: any;
+  facePresent?: boolean;
+  faceBox?: { x: number; y: number; width: number; height: number };
+  telemetry?: {
+    fps?: number;
+    rttMs?: number;
+    camWidth?: number;
+    camHeight?: number;
+  };
+}
+
+interface ChallengeDataBuffer {
+  challengeId: string;
+  challengeType: 'look_right' | 'look_left' | 'look_up' | 'open_mouth';
+  startTime: number;
+  frames: ChallengeFrameData[];
+  metadata: {
+    gestureDetected: boolean;
+    completionTime?: number;
+    totalFrames: number;
+    bufferSizeBytes: number;
+  };
+  status: 'active' | 'completed' | 'failed' | 'sent';
+}
+
 export interface UseProofOfLifeOptions {
   backendUrl: string;
   sessionId: string;
@@ -14,6 +45,7 @@ export interface UseProofOfLifeOptions {
   enableLivenessChallenge?: boolean;
   detectionIntervalFrames?: number;
   bypassValidation?: boolean;
+  maxBufferSize?: number;
   onLog?: (level: 'info' | 'warn' | 'error', message: string, data?: any) => void;
 }
 
@@ -36,10 +68,19 @@ export interface UseProofOfLifeResult {
   challengeState?: 'idle' | 'active' | 'completed' | 'transitioning';
   totalChallenges?: number;
   maxChallenges?: number;
+  bufferingMode?: boolean;
+  bufferStats?: {
+    currentFrames: number;
+    currentSizeKB: number;
+    totalBuffers: number;
+  };
 }
 
 export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResult {
-  const { backendUrl, sessionId, token, videoConstraints, maxFps = 15, enableClientHeuristics = true, minMotionScore = 0.02, phashIntervalFrames = 5, enableLivenessChallenge = true, detectionIntervalFrames = 2, bypassValidation = false, onLog } = opts;
+  const { backendUrl, sessionId, token, videoConstraints, maxFps = 15, enableClientHeuristics = true, minMotionScore = 0.02, phashIntervalFrames = 5, enableLivenessChallenge = true, detectionIntervalFrames = 2, bypassValidation = false, maxBufferSize = 50, onLog } = opts;
+  
+  // Sistema de buffer sempre habilitado como modo principal
+  const enableDataBuffering = true;
 
   // Otimizações para modo standalone
   const isStandaloneMode = useMemo(() => {
@@ -122,6 +163,20 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
   const challengeStateRef = useRef<'idle' | 'active' | 'completed' | 'transitioning'>('idle');
   const challengeCompletedRef = useRef<boolean>(false);
   const enableLivenessChallengeRef = useRef<boolean>(enableLivenessChallenge);
+  
+  // Buffer de dados por desafio
+  const currentBufferRef = useRef<ChallengeDataBuffer | null>(null);
+  const buffersHistoryRef = useRef<ChallengeDataBuffer[]>([]);
+  const [bufferingMode, setBufferingMode] = useState<boolean>(false);
+  const [bufferStats, setBufferStats] = useState<{
+    currentFrames: number;
+    currentSizeKB: number;
+    totalBuffers: number;
+  }>({
+    currentFrames: 0,
+    currentSizeKB: 0,
+    totalBuffers: 0
+  });
 
   useEffect(() => { currentChallengeRef.current = currentChallenge; }, [currentChallenge]);
   useEffect(() => { challengeStateRef.current = challengeState; }, [challengeState]);
@@ -252,6 +307,308 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     }
   }, []);
 
+  // Funções para gerenciar buffer de dados
+  const createChallengeBuffer = useCallback((challenge: { type: 'look_right' | 'look_left' | 'look_up' | 'open_mouth'; id: string }) => {
+    const buffer: ChallengeDataBuffer = {
+      challengeId: challenge.id,
+      challengeType: challenge.type,
+      startTime: Date.now(),
+      frames: [],
+      metadata: {
+        gestureDetected: false,
+        totalFrames: 0,
+        bufferSizeBytes: 0
+      },
+      status: 'active'
+    };
+    
+    currentBufferRef.current = buffer;
+    log('info', '📦 Buffer criado para desafio', { challengeId: challenge.id, type: challenge.type });
+    
+    return buffer;
+  }, [log]);
+
+  const updateBufferStats = useCallback(() => {
+    const current = currentBufferRef.current;
+    const newStats = {
+      currentFrames: current?.frames.length || 0,
+      currentSizeKB: current ? (current.metadata.bufferSizeBytes / 1024) : 0,
+      totalBuffers: buffersHistoryRef.current.length
+    };
+    setBufferStats(newStats);
+  }, []);
+
+  const addFrameToBuffer = useCallback((frameData: ChallengeFrameData) => {
+    const buffer = currentBufferRef.current;
+    if (!buffer || buffer.status !== 'active') {
+      return false;
+    }
+
+    // Verificar limite de tamanho do buffer
+    if (buffer.frames.length >= maxBufferSize) {
+      log('warn', '⚠️ Buffer atingiu tamanho máximo, removendo frame mais antigo', { 
+        challengeId: buffer.challengeId,
+        currentSize: buffer.frames.length,
+        maxSize: maxBufferSize
+      });
+      buffer.frames.shift(); // Remove o frame mais antigo
+    }
+
+    buffer.frames.push(frameData);
+    buffer.metadata.totalFrames = buffer.frames.length;
+    
+    // Calcular tamanho aproximado do buffer
+    const frameSize = (frameData.imageData?.length || 0) + JSON.stringify(frameData).length;
+    buffer.metadata.bufferSizeBytes += frameSize;
+
+    // Atualizar estatísticas
+    updateBufferStats();
+
+    return true;
+  }, [maxBufferSize, log, updateBufferStats]);
+
+  const cleanupOldBuffers = useCallback(() => {
+    const maxHistorySize = 5; // Manter apenas os últimos 5 buffers no histórico
+    
+    if (buffersHistoryRef.current.length > maxHistorySize) {
+      const removed = buffersHistoryRef.current.splice(0, buffersHistoryRef.current.length - maxHistorySize);
+      log('info', `🧹 Buffers antigos removidos da memória`, { 
+        removedCount: removed.length,
+        currentHistorySize: buffersHistoryRef.current.length
+      });
+    }
+    
+    // Calcular uso total de memória dos buffers
+    const totalMemoryBytes = buffersHistoryRef.current.reduce((acc, buffer) => {
+      return acc + buffer.metadata.bufferSizeBytes;
+    }, 0);
+    
+    const currentBufferSize = currentBufferRef.current?.metadata.bufferSizeBytes || 0;
+    const totalMemoryMB = (totalMemoryBytes + currentBufferSize) / (1024 * 1024);
+    
+    if (totalMemoryMB > 50) { // Limite de 50MB
+      log('warn', '⚠️ Uso de memória dos buffers está alto', { 
+        totalMemoryMB: totalMemoryMB.toFixed(2),
+        buffersCount: buffersHistoryRef.current.length
+      });
+      
+      // Remover metade dos buffers mais antigos
+      const toRemove = Math.floor(buffersHistoryRef.current.length / 2);
+      buffersHistoryRef.current.splice(0, toRemove);
+      log('info', `🧹 Buffers removidos por alto uso de memória`, { removedCount: toRemove });
+    }
+  }, [log]);
+
+  const completeBuffer = useCallback((gestureDetected: boolean = false) => {
+    const buffer = currentBufferRef.current;
+    if (!buffer) {
+      log('warn', '⚠️ Tentativa de completar buffer inexistente');
+      return null;
+    }
+
+    buffer.status = gestureDetected ? 'completed' : 'failed';
+    buffer.metadata.gestureDetected = gestureDetected;
+    buffer.metadata.completionTime = Date.now() - buffer.startTime;
+
+    log('info', `📦 Buffer ${gestureDetected ? 'completado' : 'falhado'}`, {
+      challengeId: buffer.challengeId,
+      type: buffer.challengeType,
+      frames: buffer.metadata.totalFrames,
+      completionTime: buffer.metadata.completionTime,
+      sizeKB: (buffer.metadata.bufferSizeBytes / 1024).toFixed(2)
+    });
+
+    // Mover para histórico
+    buffersHistoryRef.current.push(buffer);
+    
+    // Executar limpeza de memória
+    cleanupOldBuffers();
+    
+    return buffer;
+  }, [log, cleanupOldBuffers]);
+
+  const clearCurrentBuffer = useCallback(() => {
+    if (currentBufferRef.current) {
+      log('info', '🗑️ Limpando buffer atual', { challengeId: currentBufferRef.current.challengeId });
+    }
+    currentBufferRef.current = null;
+  }, [log]);
+
+  const sendBufferToStandalone = useCallback(async (buffer: ChallengeDataBuffer) => {
+    if (!buffer || buffer.status !== 'completed') {
+      log('warn', '⚠️ Tentativa de processar buffer inválido no standalone', { 
+        hasBuffer: !!buffer, 
+        status: buffer?.status 
+      });
+      return false;
+    }
+
+    try {
+      log('info', '🧪 [STANDALONE] Processando buffer completo', {
+        challengeId: buffer.challengeId,
+        type: buffer.challengeType,
+        frames: buffer.frames.length,
+        sizeKB: (buffer.metadata.bufferSizeBytes / 1024).toFixed(2),
+        completionTime: buffer.metadata.completionTime
+      });
+
+      // Simular processamento detalhado dos dados
+      const summary = {
+        challengeId: buffer.challengeId,
+        challengeType: buffer.challengeType,
+        startTime: new Date(buffer.startTime).toISOString(),
+        completionTime: buffer.metadata.completionTime,
+        totalFrames: buffer.frames.length,
+        bufferSizeKB: (buffer.metadata.bufferSizeBytes / 1024).toFixed(2),
+        gestureDetected: buffer.metadata.gestureDetected,
+        framesSample: buffer.frames.slice(0, 3).map(frame => ({
+          timestamp: frame.timestamp,
+          frameId: frame.frameId,
+          motionScore: frame.motionScore?.toFixed(4),
+          hasImage: !!frame.imageData,
+          imageSizeKB: frame.imageData ? (frame.imageData.length / 1024).toFixed(2) : '0',
+          facePresent: frame.facePresent,
+          faceBox: frame.faceBox,
+          hasLandmarks: !!frame.landmarks,
+          landmarksCount: frame.landmarks?.length || 0,
+          ahash: frame.ahash ? frame.ahash.substring(0, 8) + '...' : 'none'
+        }))
+      };
+
+      // Log detalhado dos primeiros frames para análise
+      log('info', '🔍 [STANDALONE] Análise detalhada do buffer', summary);
+
+      // Simular análise de qualidade dos dados
+      const qualityMetrics = {
+        averageMotionScore: buffer.frames.reduce((acc, frame) => acc + (frame.motionScore || 0), 0) / buffer.frames.length,
+        framesWithFace: buffer.frames.filter(frame => frame.facePresent).length,
+        framesWithLandmarks: buffer.frames.filter(frame => frame.landmarks).length,
+        framesWithImages: buffer.frames.filter(frame => frame.imageData).length,
+        uniqueAhashes: new Set(buffer.frames.map(frame => frame.ahash).filter(Boolean)).size
+      };
+
+      log('info', '📊 [STANDALONE] Métricas de qualidade dos dados', {
+        ...qualityMetrics,
+        faceDetectionRate: ((qualityMetrics.framesWithFace / buffer.frames.length) * 100).toFixed(1) + '%',
+        landmarkDetectionRate: ((qualityMetrics.framesWithLandmarks / buffer.frames.length) * 100).toFixed(1) + '%',
+        imageAvailabilityRate: ((qualityMetrics.framesWithImages / buffer.frames.length) * 100).toFixed(1) + '%'
+      });
+
+      // Simular decisão do backend baseada nos dados
+      const decision = {
+        passed: buffer.metadata.gestureDetected && qualityMetrics.framesWithFace > buffer.frames.length * 0.7,
+        confidence: Math.min(0.95, qualityMetrics.framesWithFace / buffer.frames.length + (buffer.metadata.gestureDetected ? 0.2 : 0)),
+        reasons: [
+          buffer.metadata.gestureDetected ? `Gesto ${buffer.challengeType} detectado` : 'Gesto não detectado',
+          `${qualityMetrics.framesWithFace}/${buffer.frames.length} frames com face detectada`,
+          `Tempo de conclusão: ${buffer.metadata.completionTime}ms`
+        ]
+      };
+
+      log('info', '🎯 [STANDALONE] Decisão simulada do backend', decision);
+
+      // Simular delay de processamento
+      await new Promise(resolve => setTimeout(resolve, 200));
+      
+      buffer.status = 'sent';
+      log('info', '✅ [STANDALONE] Processamento completo', { 
+        challengeId: buffer.challengeId,
+        decision: decision.passed ? 'APROVADO' : 'REJEITADO',
+        confidence: (decision.confidence * 100).toFixed(1) + '%'
+      });
+      
+      return true;
+    } catch (error) {
+      log('error', '❌ [STANDALONE] Erro ao processar buffer', { challengeId: buffer.challengeId, error });
+      return false;
+    }
+  }, [log]);
+
+  const sendBufferToBackend = useCallback(async (buffer: ChallengeDataBuffer) => {
+    if (!buffer || buffer.status !== 'completed') {
+      log('warn', '⚠️ Tentativa de enviar buffer inválido', { 
+        hasBuffer: !!buffer, 
+        status: buffer?.status 
+      });
+      return false;
+    }
+
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      log('warn', '⚠️ WebSocket não está conectado para enviar buffer');
+      return false;
+    }
+
+    try {
+      log('info', '🚀 Enviando buffer completo para backend', {
+        challengeId: buffer.challengeId,
+        type: buffer.challengeType,
+        frames: buffer.frames.length,
+        sizeKB: (buffer.metadata.bufferSizeBytes / 1024).toFixed(2)
+      });
+
+      // Enviar metadados do desafio primeiro
+      const challengeStartMessage = {
+        type: "challengeStart",
+        challengeId: buffer.challengeId,
+        challengeType: buffer.challengeType,
+        startTime: buffer.startTime,
+        totalFrames: buffer.frames.length,
+        completionTime: buffer.metadata.completionTime,
+        gestureDetected: buffer.metadata.gestureDetected
+      };
+      
+      ws.send(JSON.stringify(challengeStartMessage));
+
+      // Enviar frames em lote (pode ser necessário dividir se muito grande)
+      const batchSize = 10; // Enviar 10 frames por vez
+      for (let i = 0; i < buffer.frames.length; i += batchSize) {
+        const frameBatch = buffer.frames.slice(i, i + batchSize);
+        
+        const batchMessage = {
+          type: "challengeFrameBatch",
+          challengeId: buffer.challengeId,
+          batchIndex: Math.floor(i / batchSize),
+          frames: frameBatch.map(frame => ({
+            timestamp: frame.timestamp,
+            frameId: frame.frameId,
+            imageData: frame.imageData,
+            motionScore: frame.motionScore,
+            ahash: frame.ahash,
+            facePresent: frame.facePresent,
+            faceBox: frame.faceBox,
+            landmarks: frame.landmarks,
+            telemetry: frame.telemetry
+          }))
+        };
+
+        ws.send(JSON.stringify(batchMessage));
+        
+        // Pequeno delay entre batches para não sobrecarregar
+        if (i + batchSize < buffer.frames.length) {
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+      }
+
+      // Sinalizar fim do envio
+      const challengeEndMessage = {
+        type: "challengeEnd", 
+        challengeId: buffer.challengeId,
+        timestamp: Date.now()
+      };
+      
+      ws.send(JSON.stringify(challengeEndMessage));
+      
+      buffer.status = 'sent';
+      log('info', '✅ Buffer enviado com sucesso', { challengeId: buffer.challengeId });
+      
+      return true;
+    } catch (error) {
+      log('error', '❌ Erro ao enviar buffer', { challengeId: buffer.challengeId, error });
+      return false;
+    }
+  }, [log]);
+
   // Sistema de desafios controlados sequencialmente
   const generateChallengeQueueRef = useRef(() => {
     log('info', '🎲 Gerando nova fila de desafios...');
@@ -322,6 +679,16 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     setChallengeStartTime(Date.now());
     setTotalChallenges(prev => prev + 1);
     
+    // Criar buffer para o novo desafio (funciona em standalone e backend)
+    if (enableDataBuffering) {
+      createChallengeBuffer(newChallenge);
+      setBufferingMode(true);
+      log('info', '📦 Modo buffering ativado para desafio', { 
+        challengeId: newChallenge.id,
+        mode: isStandaloneMode ? 'standalone' : 'backend'
+      });
+    }
+    
     log('info', `🎯 Desafio ${totalChallenges + 1}/${maxChallenges}: ${nextChallengeType}`, { id: challengeId });
     console.log('📌 Estado após iniciar desafio:', {
       currentChallenge: currentChallengeRef.current,
@@ -345,6 +712,17 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     
     challengeTimeoutRef.current = window.setTimeout(() => {
       log('warn', `⏰ Desafio ${nextChallengeType} expirou - próximo desafio`);
+      
+      // Falhar buffer se estiver ativo (funciona em standalone e backend)
+      if (enableDataBuffering && currentBufferRef.current) {
+        completeBuffer(false); // false = falhou
+        clearCurrentBuffer();
+        setBufferingMode(false);
+        log('info', '🗑️ Buffer descartado devido ao timeout do desafio', {
+          mode: isStandaloneMode ? 'standalone' : 'backend'
+        });
+      }
+      
       setChallengeState('transitioning');
       challengeStateRef.current = 'transitioning';
       setTimeout(() => startNextChallengeRef.current?.(), 1000);
@@ -383,15 +761,43 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
       challengeTimeoutRef.current = null;
     }
     
-    // Enviar resultado para o backend (se conectado)
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: "challengeResponse",
-        challengeId: currentChallengeRef.current?.id,
-        completed: true,
-        completionTime,
-        timestamp: Date.now()
-      }));
+    // Completar buffer e enviar para o backend (funciona tanto com backend quanto standalone)
+    if (enableDataBuffering && currentBufferRef.current) {
+      const completedBuffer = completeBuffer(true);
+      if (completedBuffer) {
+        if (isStandaloneMode) {
+          // Modo standalone: simular envio para logs e teste
+          sendBufferToStandalone(completedBuffer).then((success) => {
+            if (success) {
+              log('info', '✅ Buffer processado com sucesso no modo standalone');
+            } else {
+              log('error', '❌ Falha ao processar buffer no modo standalone');
+            }
+          });
+        } else {
+          // Modo backend: enviar buffer completo de forma assíncrona
+          sendBufferToBackend(completedBuffer).then((success) => {
+            if (success) {
+              log('info', '✅ Buffer enviado com sucesso após completar desafio');
+            } else {
+              log('error', '❌ Falha ao enviar buffer após completar desafio');
+            }
+          });
+        }
+      }
+      clearCurrentBuffer();
+      setBufferingMode(false);
+    } else {
+      // Modo tradicional: enviar resultado individual para o backend (se conectado)
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: "challengeResponse",
+          challengeId: currentChallengeRef.current?.id,
+          completed: true,
+          completionTime,
+          timestamp: Date.now()
+        }));
+      }
     }
     
     // Aguardar 2 segundos antes do próximo desafio
@@ -490,6 +896,9 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const ctx = (canvas.getContext("2d", { willReadFrequently: true } as any) || canvas.getContext("2d")) as CanvasRenderingContext2D | null;
     if (!ctx) return;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    // Verificar se devemos usar buffer ou enviar diretamente
+    const shouldBuffer = enableDataBuffering && !isStandaloneMode && bufferingMode && currentBufferRef.current;
 
     if (bypassValidation) {
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -781,43 +1190,86 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
         }
       }
 
-      // Enviar telemetria apenas quando necessário (motion score significativo)
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && motionScore >= minMotionScore) {
-        const tel: any = { type: "telemetry", motionScore };
-        if (ahashHex) tel.ahash = ahashHex;
-        
-        console.log("📊 Telemetria enviada:", {
-          motionScore: tel.motionScore?.toFixed(4),
-          ahash: !!tel.ahash,
-          threshold: minMotionScore
-        });
-        wsRef.current.send(JSON.stringify(tel));
+      // Preparar dados do frame para buffer ou envio direto
+      const frameData: ChallengeFrameData = {
+        timestamp: now,
+        frameId: Date.now(),
+        motionScore,
+        ahash: ahashHex,
+        landmarks: landmarksRef.current,
+        facePresent,
+        faceBox,
+        telemetry: {
+          fps: targetFps,
+          rttMs,
+          camWidth: canvas.width,
+          camHeight: canvas.height
+        }
+      };
+      
+      if (shouldBuffer) {
+        // Modo buffer: adicionar dados ao buffer atual
+        const added = addFrameToBuffer(frameData);
+        if (added && frameCounterRef.current % 30 === 0) {
+          log('info', '📦 Frame adicionado ao buffer', {
+            challengeId: currentBufferRef.current?.challengeId,
+            framesInBuffer: currentBufferRef.current?.frames.length,
+            bufferSizeKB: ((currentBufferRef.current?.metadata.bufferSizeBytes || 0) / 1024).toFixed(2)
+          });
+        }
+      } else {
+        // Modo tradicional: enviar telemetria diretamente quando necessário
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && motionScore >= minMotionScore) {
+          const tel: any = { type: "telemetry", motionScore };
+          if (ahashHex) tel.ahash = ahashHex;
+          
+          console.log("📊 Telemetria enviada:", {
+            motionScore: tel.motionScore?.toFixed(4),
+            ahash: !!tel.ahash,
+            threshold: minMotionScore
+          });
+          wsRef.current.send(JSON.stringify(tel));
+        }
       }
     }
+    
+    // Enviar imagem apenas se não estiver em modo buffer ou se for modo tradicional
+    const shouldSendImage = !shouldBuffer || bypassValidation;
     const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
+    
+    if (shouldSendImage && ws && ws.readyState === WebSocket.OPEN) {
       canvas.toBlob((blob) => {
         if (!blob) return;
         const ts = Date.now();
         sendTimesRef.current.set(ts, performance.now());
         const reader = new FileReader();
         reader.onload = () => {
-          const arr = new Uint8Array(reader.result as ArrayBuffer);
-          const header = new Uint8Array(16);
-          header.set([0x46, 0x50, 0x46, 0x31]);
-          header[4] = 1;
-          const view = new DataView(header.buffer);
-          view.setBigUint64(8, BigInt(ts), true);
-          const packet = new Uint8Array(header.length + arr.length);
-          packet.set(header, 0);
-          packet.set(arr, header.length);
-          const ws2 = wsRef.current;
-          if (ws2 && ws2.readyState === WebSocket.OPEN) ws2.send(packet);
+          if (shouldBuffer && currentBufferRef.current) {
+            // Se estamos em modo buffer, adicionar imagem ao frame buffer mais recente
+            const base64 = btoa(String.fromCharCode(...new Uint8Array(reader.result as ArrayBuffer)));
+            const lastFrame = currentBufferRef.current.frames[currentBufferRef.current.frames.length - 1];
+            if (lastFrame) {
+              lastFrame.imageData = base64;
+            }
+          } else {
+            // Modo tradicional: enviar diretamente via WebSocket binário
+            const arr = new Uint8Array(reader.result as ArrayBuffer);
+            const header = new Uint8Array(16);
+            header.set([0x46, 0x50, 0x46, 0x31]);
+            header[4] = 1;
+            const view = new DataView(header.buffer);
+            view.setBigUint64(8, BigInt(ts), true);
+            const packet = new Uint8Array(header.length + arr.length);
+            packet.set(header, 0);
+            packet.set(arr, header.length);
+            const ws2 = wsRef.current;
+            if (ws2 && ws2.readyState === WebSocket.OPEN) ws2.send(packet);
+          }
         };
         reader.readAsArrayBuffer(blob);
       }, "image/jpeg", 0.7);
     }
-  }, [enableClientHeuristics, effectiveMaxFps, minMotionScore, effectivePhashInterval, send, targetFps, effectiveDetectionInterval, bypassValidation, enableLivenessChallenge, analyzeGesture, log, standaloneMode]);
+  }, [enableClientHeuristics, effectiveMaxFps, minMotionScore, effectivePhashInterval, send, targetFps, effectiveDetectionInterval, bypassValidation, enableLivenessChallenge, analyzeGesture, log, standaloneMode, enableDataBuffering, bufferingMode, addFrameToBuffer, rttMs]);
 
   const start = useCallback(async () => {
     console.log('🔥 FUNÇÃO START CHAMADA!!! initializationRef.current:', initializationRef.current);
@@ -1190,14 +1642,17 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     setFacePresent(undefined);
     setFaceBox(undefined);
     
-    // Limpar refs
+    // Limpar refs e buffers
     challengeQueue.current = [];
     landmarksRef.current = null;
+    currentBufferRef.current = null;
+    buffersHistoryRef.current = [];
+    setBufferingMode(false);
     
     log('info', '✅ Sistema parado completamente');
   }, [log]);
 
-  return { status, start, stop, lastPrompt, error, rttMs, targetFps, throttled, lastAckAt, facePresent, faceBox, currentChallenge, challengeCompleted, standaloneMode, challengeStartTime, challengeState, totalChallenges, maxChallenges };
+  return { status, start, stop, lastPrompt, error, rttMs, targetFps, throttled, lastAckAt, facePresent, faceBox, currentChallenge, challengeCompleted, standaloneMode, challengeStartTime, challengeState, totalChallenges, maxChallenges, bufferingMode, bufferStats };
 }
 
 

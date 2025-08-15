@@ -92,7 +92,11 @@ export function App() {
           />
           <span>Debug Mode (mostrar logs detalhados)</span>
         </label>
-        <p className="muted" style={{marginTop: 0}}>Crie a sessão antes de iniciar para evitar handshake inválido (hello primeiro).</p>
+
+        <p className="muted" style={{marginTop: 0}}>
+          Crie a sessão antes de iniciar para evitar handshake inválido (hello primeiro).<br/>
+          📦 <strong>Sistema de Buffer:</strong> Os dados são armazenados localmente durante cada desafio e enviados apenas quando completados com sucesso.
+        </p>
         <div className="row">
           <button onClick={createSession} className="ghost" disabled={busy}>{busy ? "Creating..." : "Create session"}</button>
           <button onClick={() => setShow(true)} disabled={!backendUrl || !sessionId || !token}>Start</button>
@@ -130,7 +134,8 @@ export function App() {
         </div>
         <p className="muted" style={{marginTop: "10px", fontSize: "12px"}}>
           💡 <strong>Modo Standalone:</strong> Clique no botão azul para testar apenas a detecção de gestos com MediaPipe, sem precisar de backend. 
-          Os desafios aparecerão automaticamente: olhar direita ➡️, esquerda ⬅️, cima ⬆️ e abrir boca 😮.
+          Os desafios aparecerão automaticamente: olhar direita ➡️, esquerda ⬅️, cima ⬆️ e abrir boca 😮.<br/>
+          📦 <strong>Sistema de Buffer:</strong> No modo standalone, os dados são coletados e processados localmente com logs detalhados para testes.
         </p>
       </div>
 
