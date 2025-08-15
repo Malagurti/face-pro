@@ -208,10 +208,9 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const eyeCenter = { x: (leftEye.x + rightEye.x) / 2, y: (leftEye.y + rightEye.y) / 2 };
     const noseOffset = noseTip.x - eyeCenter.x;
     
-    console.log("👁️ analyzeLookRight:", { noseOffset, threshold: 0.09, detected: noseOffset > 0.09, eyeCenter: eyeCenter.x, noseTip: noseTip.x });
-    // Se noseOffset > 0.03, nariz está à direita dos olhos = cabeça virada para direita
-    // Threshold ajustado baseado nos logs reais observados
-    return noseOffset > 0.09; // Threshold reduzido de 0.05 para 0.03
+    const threshold = 0.03;
+    console.log("👁️ analyzeLookRight:", { noseOffset, threshold, detected: noseOffset > threshold, eyeCenter: eyeCenter.x, noseTip: noseTip.x });
+    return noseOffset > threshold;
   }, []);
 
   const analyzeLookLeft = useCallback((landmarks: any) => {
@@ -226,10 +225,9 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const eyeCenter = { x: (leftEye.x + rightEye.x) / 2, y: (leftEye.y + rightEye.y) / 2 };
     const noseOffset = noseTip.x - eyeCenter.x;
     
-    console.log("👁️ analyzeLookLeft:", { noseOffset, threshold: 0.09, detected: noseOffset > 0.09, eyeCenter: eyeCenter.x, noseTip: noseTip.x });
-    // Se noseOffset > 0.10, nariz está à direita dos olhos = cabeça virada para esquerda
-    // Threshold ajustado baseado nos logs reais observados
-    return noseOffset > 0.09; // Threshold reduzido de 0.12 para 0.10
+    const threshold = -0.03;
+    console.log("👁️ analyzeLookLeft:", { noseOffset, threshold, detected: noseOffset < threshold, eyeCenter: eyeCenter.x, noseTip: noseTip.x });
+    return noseOffset < threshold;
   }, []);
 
   const analyzeLookUp = useCallback((landmarks: any) => {
@@ -244,10 +242,9 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const eyebrowCenter = { x: (eyebrowLeft.x + eyebrowRight.x) / 2, y: (eyebrowLeft.y + eyebrowRight.y) / 2 };
     const faceHeight = Math.abs(chinBottom.y - eyebrowCenter.y);
     
-    console.log("👁️ analyzeLookUp:", { faceHeight, threshold: 0.32, detected: faceHeight < 0.32, eyebrowY: eyebrowCenter.y, chinY: chinBottom.y });
-    // Detectar se a cabeça está levantada (face comprimida verticalmente)
-    // Threshold baseado em pesquisa: equivale a ~15-20° de rotação pitch
-    return faceHeight < 0.32; // Threshold otimizado baseado em melhores práticas
+    const threshold = 0.36;
+    console.log("👁️ analyzeLookUp:", { faceHeight, threshold, detected: faceHeight < threshold, eyebrowY: eyebrowCenter.y, chinY: chinBottom.y });
+    return faceHeight < threshold;
   }, []);
 
   const analyzeOpenMouth = useCallback((landmarks: any) => {
@@ -264,8 +261,9 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const mouthWidth = Math.abs(mouthRight.x - mouthLeft.x);
     const mouthAspectRatio = mouthHeight / mouthWidth;
     
-    console.log("👁️ analyzeOpenMouth:", { mouthHeight, mouthWidth, mouthAspectRatio, threshold: 0.6, detected: mouthAspectRatio > 0.6 });
-    return mouthAspectRatio > 0.6; // Threshold otimizado baseado em melhores práticas
+    const threshold = 0.5;
+    console.log("👁️ analyzeOpenMouth:", { mouthHeight, mouthWidth, mouthAspectRatio, threshold, detected: mouthAspectRatio > threshold });
+    return mouthAspectRatio > threshold;
   }, []);
 
   const analyzeGesture = useCallback((landmarks: any) => {
@@ -826,6 +824,24 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
       challengeStateRef.current = 'idle';
       if (isStandaloneMode) {
         startNextChallengeRef.current?.();
+      } else {
+        // Solicitar próximo prompt ao backend após completar envio do buffer
+        send({ type: 'feedback', status: 'continue' });
+        if (!promptWatchdogRef.current) {
+          promptWatchdogRef.current = window.setInterval(() => {
+            if (!streamingRef.current) {
+              if (promptWatchdogRef.current) {
+                clearInterval(promptWatchdogRef.current);
+                promptWatchdogRef.current = null;
+              }
+              return;
+            }
+            if (!currentChallengeRef.current && challengeStateRef.current === 'idle') {
+              log('info', '🔔 (idle) Solicitando próximo prompt ao backend');
+              send({ type: 'feedback', status: 'continue' });
+            }
+          }, 2000);
+        }
       }
     }, 2000);
   };

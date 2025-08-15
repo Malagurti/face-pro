@@ -8,6 +8,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+#[cfg(feature = "onnx")]
 use image::GenericImageView;
 use tower_http::cors::{Any, CorsLayer};
 use serde::Serialize;
@@ -17,6 +18,8 @@ use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 mod protocol;
 mod infer;
@@ -104,10 +107,11 @@ enum FsmState {
 struct SessionFsm {
     state: FsmState,
     completed: u32,
+    failed: u32,
 }
 
 impl SessionFsm {
-    fn new() -> Self { Self { state: FsmState::Idle, completed: 0 } }
+    fn new() -> Self { Self { state: FsmState::Idle, completed: 0, failed: 0 } }
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -545,7 +549,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                                 buffer.challenge_id, decision);
                                         }
                                         
-                                        // Atualizar FSM se necessário
+                                        // Atualizar FSM e, se passar/falhar, seguir fluxo acumulativo
                                         if decision.passed {
                                             s.fsm.completed += 1;
                                             println!("✅ [BUFFER] Desafio {} concluído! ({}/3)", 
@@ -559,6 +563,43 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                                     decision: protocol::Decision { passed: true, reason: None } 
                                                 };
                                                 let _ = socket.send(Message::Text(serde_json::to_string(&final_result).unwrap())).await;
+                                            } else {
+                                                let mut all = vec![ChallengeKind::OpenMouth, ChallengeKind::TurnLeft, ChallengeKind::TurnRight, ChallengeKind::HeadUp];
+                                                let current_kind = match &s.fsm.state { FsmState::Prompting { kind, .. } => kind.clone(), _ => ChallengeKind::OpenMouth };
+                                                all.retain(|k| *k != current_kind);
+                                                if !all.is_empty() {
+                                                    let idx = (s.fsm.completed as usize) % all.len();
+                                                    let nk = all[idx].clone();
+                                                    let next_id = format!("c{}", s.fsm.completed + 1);
+                                                    let next = ServerMessage::Prompt { challenge: protocol::PromptChallenge { id: &next_id, kind: nk.clone(), timeout_ms: 5000 } };
+                                                    let _ = socket.send(Message::Text(serde_json::to_string(&next).unwrap())).await;
+                                                    s.fsm.state = FsmState::Prompting { challenge_id: next_id, kind: nk };
+                                                }
+                                            }
+                                        } else {
+                                            s.fsm.failed += 1;
+                                            println!("❌ [BUFFER] Desafio {} falhou! fails={} completes={}", buffer.challenge_id, s.fsm.failed, s.fsm.completed);
+                                            // Mesmo com falha, dispare próximo se ainda faltam desafios
+                                            if s.fsm.completed + s.fsm.failed < 3 {
+                                                let mut all = vec![ChallengeKind::OpenMouth, ChallengeKind::TurnLeft, ChallengeKind::TurnRight, ChallengeKind::HeadUp];
+                                                let current_kind = match &s.fsm.state { FsmState::Prompting { kind, .. } => kind.clone(), _ => ChallengeKind::OpenMouth };
+                                                all.retain(|k| *k != current_kind);
+                                                if !all.is_empty() {
+                                                    let idx = ((s.fsm.completed + s.fsm.failed) as usize) % all.len();
+                                                    let nk = all[idx].clone();
+                                                    let next_id = format!("c{}", s.fsm.completed + s.fsm.failed + 1);
+                                                    let next = ServerMessage::Prompt { challenge: protocol::PromptChallenge { id: &next_id, kind: nk.clone(), timeout_ms: 5000 } };
+                                                    let _ = socket.send(Message::Text(serde_json::to_string(&next).unwrap())).await;
+                                                    s.fsm.state = FsmState::Prompting { challenge_id: next_id, kind: nk };
+                                                }
+                                            } else {
+                                                // Finalizar com resultado agregado
+                                                let final_passed = s.fsm.completed >= 3; // exige todos passarem
+                                                let final_result = ServerMessage::Result { 
+                                                    decision: protocol::Decision { passed: final_passed, reason: None }
+                                                };
+                                                let _ = socket.send(Message::Text(serde_json::to_string(&final_result).unwrap())).await;
+                                                s.fsm.state = if final_passed { FsmState::Passed } else { FsmState::Failed };
                                             }
                                         }
                                     } else {
@@ -589,7 +630,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                             // PAD heuristics (JSON path)
                             let mut pad_dbg = None;
                             if let Some(ref b64) = frame.data {
-                                if let Ok(bytes) = base64::decode(&b64) {
+                                if let Ok(bytes) = BASE64.decode(&b64) {
                                     if bytes.len() < 100 { valid = false; }
                                     let mut sessions = state.sessions.write().await;
                                     if let Some(s) = sessions.values_mut().next() {
@@ -604,7 +645,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                             let face_opt = {
                                 let mut res = None;
                                 if let Some(ref b64) = frame.data {
-                                    if let Ok(bytes) = base64::decode(b64) {
+                                    if let Ok(bytes) = BASE64.decode(b64) {
                                         if let Ok(img) = image::load_from_memory(&bytes) {
                                             let (w, h) = img.dimensions();
                                             let rgb = img.to_rgb8();
@@ -637,6 +678,10 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                             if let Some(s) = sessions.values_mut().next() {
                                 match &mut s.fsm.state {
                                     FsmState::Prompting { challenge_id, kind } => {
+                                        if fb.status.as_deref() == Some("continue") {
+                                            let prompt = ServerMessage::Prompt { challenge: protocol::PromptChallenge { id: &challenge_id, kind: kind.clone(), timeout_ms: 5000 } };
+                                            let _ = socket.send(Message::Text(serde_json::to_string(&prompt).unwrap())).await;
+                                        }
                                         let ok = fb.ok.unwrap_or(false);
                                         let valid_kind = fb.kind.as_ref().map(|k| k == kind).unwrap_or(true);
                                         if ok && valid_kind {
