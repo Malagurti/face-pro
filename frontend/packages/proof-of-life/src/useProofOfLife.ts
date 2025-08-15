@@ -208,7 +208,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const eyeCenter = { x: (leftEye.x + rightEye.x) / 2, y: (leftEye.y + rightEye.y) / 2 };
     const noseOffset = noseTip.x - eyeCenter.x;
     
-    const threshold = 0.03;
+    const threshold = 0.06;
     console.log("👁️ analyzeLookRight:", { noseOffset, threshold, detected: noseOffset > threshold, eyeCenter: eyeCenter.x, noseTip: noseTip.x });
     return noseOffset > threshold;
   }, []);
@@ -225,7 +225,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const eyeCenter = { x: (leftEye.x + rightEye.x) / 2, y: (leftEye.y + rightEye.y) / 2 };
     const noseOffset = noseTip.x - eyeCenter.x;
     
-    const threshold = -0.03;
+    const threshold = -0.06;
     console.log("👁️ analyzeLookLeft:", { noseOffset, threshold, detected: noseOffset < threshold, eyeCenter: eyeCenter.x, noseTip: noseTip.x });
     return noseOffset < threshold;
   }, []);
@@ -242,7 +242,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const eyebrowCenter = { x: (eyebrowLeft.x + eyebrowRight.x) / 2, y: (eyebrowLeft.y + eyebrowRight.y) / 2 };
     const faceHeight = Math.abs(chinBottom.y - eyebrowCenter.y);
     
-    const threshold = 0.36;
+    const threshold = 0.40;
     console.log("👁️ analyzeLookUp:", { faceHeight, threshold, detected: faceHeight < threshold, eyebrowY: eyebrowCenter.y, chinY: chinBottom.y });
     return faceHeight < threshold;
   }, []);
@@ -261,7 +261,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const mouthWidth = Math.abs(mouthRight.x - mouthLeft.x);
     const mouthAspectRatio = mouthHeight / mouthWidth;
     
-    const threshold = 0.5;
+    const threshold = 0.55;
     console.log("👁️ analyzeOpenMouth:", { mouthHeight, mouthWidth, mouthAspectRatio, threshold, detected: mouthAspectRatio > threshold });
     return mouthAspectRatio > threshold;
   }, []);
@@ -823,7 +823,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
       setChallengeState('idle');
       challengeStateRef.current = 'idle';
       if (isStandaloneMode) {
-        startNextChallengeRef.current?.();
+        setTimeout(() => startNextChallengeRef.current?.(), 400); // transição suave
       } else {
         // Solicitar próximo prompt ao backend após completar envio do buffer
         send({ type: 'feedback', status: 'continue' });
@@ -840,10 +840,10 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
               log('info', '🔔 (idle) Solicitando próximo prompt ao backend');
               send({ type: 'feedback', status: 'continue' });
             }
-          }, 2000);
+          }, 500); // reagir mais rápido mas com intervalo curto
         }
       }
-    }, 2000);
+    }, 500); // reduzir tempo de tela preta
   };
 
   const completeCurrentChallenge = useCallback(() => {

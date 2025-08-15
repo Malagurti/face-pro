@@ -276,12 +276,12 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
           fontSize: 16, 
           fontWeight: "bold", 
           padding: "12px",
-          backgroundColor: challengeCompleted ? "rgba(16, 185, 129, 0.8)" : challengeState === 'transitioning' ? "rgba(245, 158, 11, 0.8)" : "rgba(0,0,0,0.8)",
+          backgroundColor: challengeCompleted ? "rgba(16, 185, 129, 0.85)" : challengeState === 'transitioning' ? "rgba(245, 158, 11, 0.85)" : "rgba(0,0,0,0.6)",
           color: "white",
           borderRadius: "12px",
           textAlign: "center",
           margin: "10px 0",
-          boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+          boxShadow: "0 8px 18px rgba(0,0,0,0.35)",
           border: challengeCompleted ? "2px solid #10b981" : challengeState === 'transitioning' ? "2px solid #f59e0b" : "2px solid #3b82f6"
         }}>
           {challengeCompleted 
