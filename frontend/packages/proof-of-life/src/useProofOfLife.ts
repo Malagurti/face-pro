@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Status = "idle" | "connecting" | "prompt" | "streaming" | "passed" | "failed";
 
@@ -40,12 +40,55 @@ export interface UseProofOfLifeResult {
 
 export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResult {
   const { backendUrl, sessionId, token, videoConstraints, maxFps = 15, enableClientHeuristics = true, minMotionScore = 0.02, phashIntervalFrames = 5, enableLivenessChallenge = true, detectionIntervalFrames = 2, bypassValidation = false, onLog } = opts;
+
+  // Otimizações para modo standalone
+  const isStandaloneMode = useMemo(() => {
+    return !backendUrl || !sessionId || !token || sessionId === "" || token === "";
+  }, [backendUrl, sessionId, token]);
+
+  // Intervalos otimizados para standalone
+  const effectiveDetectionInterval = useMemo(() => {
+    if (isStandaloneMode && enableLivenessChallenge) {
+      return 8; // MediaPipe a cada 8 frames (7.5 FPS) em vez de 2 (30 FPS)
+    }
+    return detectionIntervalFrames;
+  }, [isStandaloneMode, enableLivenessChallenge, detectionIntervalFrames]);
+
+  const effectivePhashInterval = useMemo(() => {
+    if (isStandaloneMode) {
+      return 15; // Hash a cada 15 frames (4 FPS) em vez de 5 (12 FPS)
+    }
+    return phashIntervalFrames;
+  }, [isStandaloneMode, phashIntervalFrames]);
+
+  const effectiveMaxFps = useMemo(() => {
+    if (isStandaloneMode && enableLivenessChallenge) {
+      return 10; // Limitar a 10 FPS em standalone para economizar CPU
+    }
+    return maxFps;
+  }, [isStandaloneMode, enableLivenessChallenge, maxFps]);
+  
+  // Debug: verificar props recebidas
+  React.useEffect(() => {
+    console.log('🔧 Props recebidas no useProofOfLife:', {
+      backendUrl,
+      sessionId,
+      token,
+      enableLivenessChallenge,
+      bypassValidation,
+      hasNoBackend: !backendUrl || !sessionId || !token,
+      isStandaloneMode,
+      effectiveDetectionInterval,
+      effectivePhashInterval,
+      effectiveMaxFps
+    });
+  }, [backendUrl, sessionId, token, enableLivenessChallenge, bypassValidation, isStandaloneMode, effectiveDetectionInterval, effectivePhashInterval, effectiveMaxFps]);
   const [status, setStatus] = useState<Status>("idle");
   const [lastPrompt, setLastPrompt] = useState<UseProofOfLifeResult["lastPrompt"]>();
   const [error, setError] = useState<string | undefined>();
   const [rttMs, setRttMs] = useState<number | undefined>();
   const [throttled, setThrottled] = useState<boolean>(false);
-  const [targetFps, setTargetFps] = useState<number>(maxFps);
+  const [targetFps, setTargetFps] = useState<number>(effectiveMaxFps);
   const [lastAckAt, setLastAckAt] = useState<number | undefined>();
   const wsRef = useRef<WebSocket | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -75,23 +118,39 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
   const challengeQueue = useRef<Array<'look_right' | 'look_left' | 'look_up' | 'open_mouth'>>([]);
   const initializationRef = useRef<boolean>(false);
   const standaloneInitialized = useRef<boolean>(false);
+  const currentChallengeRef = useRef<{ type: 'look_right' | 'look_left' | 'look_up' | 'open_mouth'; id: string } | undefined>(undefined);
+  const challengeStateRef = useRef<'idle' | 'active' | 'completed' | 'transitioning'>('idle');
+  const challengeCompletedRef = useRef<boolean>(false);
+  const enableLivenessChallengeRef = useRef<boolean>(enableLivenessChallenge);
+
+  useEffect(() => { currentChallengeRef.current = currentChallenge; }, [currentChallenge]);
+  useEffect(() => { challengeStateRef.current = challengeState; }, [challengeState]);
+  useEffect(() => { challengeCompletedRef.current = challengeCompleted; }, [challengeCompleted]);
+  useEffect(() => { enableLivenessChallengeRef.current = enableLivenessChallenge; }, [enableLivenessChallenge]);
 
   const wsUrl = useMemo(() => backendUrl.replace(/^http/, "ws") + "/ws", [backendUrl]);
 
   // Analisadores de gestos
   const analyzeLookRight = useCallback((landmarks: any) => {
-    if (!landmarks || landmarks.length === 0) return false;
+    if (!landmarks || landmarks.length === 0) {
+      console.log("🔍 analyzeLookRight: sem landmarks");
+      return false;
+    }
     
     const leftEye = landmarks[33]; // Canto esquerdo do olho esquerdo
     const rightEye = landmarks[362]; // Canto direito do olho direito
     const noseTip = landmarks[1]; // Ponta do nariz
     
-    if (!leftEye || !rightEye || !noseTip) return false;
+    if (!leftEye || !rightEye || !noseTip) {
+      console.log("🔍 analyzeLookRight: landmarks insuficientes", { leftEye: !!leftEye, rightEye: !!rightEye, noseTip: !!noseTip });
+      return false;
+    }
     
     // Calcular se a cabeça está virada para a direita
     const eyeCenter = { x: (leftEye.x + rightEye.x) / 2, y: (leftEye.y + rightEye.y) / 2 };
     const noseOffset = noseTip.x - eyeCenter.x;
     
+    console.log("👁️ analyzeLookRight:", { noseOffset, threshold: 0.03, detected: noseOffset > 0.03 });
     return noseOffset > 0.03; // Threshold para detectar movimento à direita
   }, []);
 
@@ -107,6 +166,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const eyeCenter = { x: (leftEye.x + rightEye.x) / 2, y: (leftEye.y + rightEye.y) / 2 };
     const noseOffset = noseTip.x - eyeCenter.x;
     
+    console.log("👁️ analyzeLookLeft:", { noseOffset, threshold: -0.03, detected: noseOffset < -0.03 });
     return noseOffset < -0.03; // Threshold para detectar movimento à esquerda
   }, []);
 
@@ -122,6 +182,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const eyebrowCenter = { x: (eyebrowLeft.x + eyebrowRight.x) / 2, y: (eyebrowLeft.y + eyebrowRight.y) / 2 };
     const faceHeight = Math.abs(chinBottom.y - eyebrowCenter.y);
     
+    console.log("👁️ analyzeLookUp:", { faceHeight, threshold: 0.15, detected: faceHeight < 0.15 });
     // Detectar se a cabeça está levantada (face comprimida verticalmente)
     return faceHeight < 0.15; // Threshold para detectar cabeça para cima
   }, []);
@@ -140,13 +201,26 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     const mouthWidth = Math.abs(mouthRight.x - mouthLeft.x);
     const mouthAspectRatio = mouthHeight / mouthWidth;
     
+    console.log("👁️ analyzeOpenMouth:", { mouthHeight, mouthWidth, mouthAspectRatio, threshold: 0.5, detected: mouthAspectRatio > 0.5 });
     return mouthAspectRatio > 0.5; // Threshold para detectar boca aberta
   }, []);
 
   const analyzeGesture = useCallback((landmarks: any) => {
-    if (!currentChallenge || !landmarks) return false;
+    // Usar ref para consistência com o loop de detecção
+    const currentChallengeFromRef = currentChallengeRef.current;
+    if (!currentChallengeFromRef || !landmarks) {
+      console.log("🔍 analyzeGesture: sem desafio ou landmarks", { 
+        hasChallenge: !!currentChallengeFromRef, 
+        hasLandmarks: !!landmarks,
+        challengeFromRef: currentChallengeFromRef,
+        challengeFromState: currentChallenge
+      });
+      return false;
+    }
     
-    switch (currentChallenge.type) {
+    console.log("🎯 Analisando gesto para:", currentChallengeFromRef.type);
+    
+    switch (currentChallengeFromRef.type) {
       case 'look_right':
         return analyzeLookRight(landmarks);
       case 'look_left':
@@ -156,6 +230,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
       case 'open_mouth':
         return analyzeOpenMouth(landmarks);
       default:
+        console.log("❌ Tipo de desafio desconhecido:", currentChallengeFromRef.type);
         return false;
     }
   }, [currentChallenge, analyzeLookRight, analyzeLookLeft, analyzeLookUp, analyzeOpenMouth]);
@@ -174,6 +249,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
 
   // Sistema de desafios controlados sequencialmente
   const generateChallengeQueueRef = useRef(() => {
+    log('info', '🎲 Gerando nova fila de desafios...');
     const allChallenges: Array<'look_right' | 'look_left' | 'look_up' | 'open_mouth'> = ['look_right', 'look_left', 'look_up', 'open_mouth'];
     const shuffled = [...allChallenges].sort(() => Math.random() - 0.5);
     challengeQueue.current = shuffled.slice(0, maxChallenges);
@@ -187,6 +263,20 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
   const startNextChallengeRef = useRef<() => void>();
   
   startNextChallengeRef.current = () => {
+    log('info', '🎯 startNextChallenge executado!', {
+      challengeState,
+      totalChallenges,
+      maxChallenges,
+      queueLength: challengeQueue.current.length
+    });
+    
+    console.log('🔍 Verificação de estado em startNextChallenge:', {
+      challengeState,
+      challengeStateRef: challengeStateRef.current,
+      currentChallenge: currentChallengeRef.current,
+      challengeCompleted: challengeCompletedRef.current
+    });
+    
     if (challengeState !== 'idle' && challengeState !== 'transitioning') {
       log('warn', '⚠️ Tentativa de iniciar desafio com estado inválido:', challengeState);
       return;
@@ -200,12 +290,13 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     }
 
     if (challengeQueue.current.length === 0) {
+      log('info', '📝 Fila de desafios vazia, gerando nova...');
       generateChallengeQueueRef.current();
     }
 
     const nextChallengeType = challengeQueue.current.shift();
     if (!nextChallengeType) {
-      log('error', '❌ Erro: fila de desafios vazia');
+      log('error', '❌ Erro: fila de desafios vazia após geração');
       return;
     }
 
@@ -215,13 +306,32 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
       id: challengeId
     };
     
+    log('info', '🔄 Atualizando estados para novo desafio...', newChallenge);
+    
     setCurrentChallenge(newChallenge);
+    currentChallengeRef.current = newChallenge;
     setChallengeCompleted(false);
+    challengeCompletedRef.current = false;
     setChallengeState('active');
+    challengeStateRef.current = 'active';
     setChallengeStartTime(Date.now());
     setTotalChallenges(prev => prev + 1);
     
     log('info', `🎯 Desafio ${totalChallenges + 1}/${maxChallenges}: ${nextChallengeType}`, { id: challengeId });
+    console.log('📌 Estado após iniciar desafio:', {
+      currentChallenge: currentChallengeRef.current,
+      challengeState: challengeStateRef.current,
+      challengeCompleted: challengeCompletedRef.current
+    });
+    
+    // Verificação adicional para debug
+    setTimeout(() => {
+      console.log('🔍 Verificação tardia dos refs:', {
+        currentChallengeRef: currentChallengeRef.current,
+        challengeStateRef: challengeStateRef.current,
+        challengeCompletedRef: challengeCompletedRef.current
+      });
+    }, 100);
     
     // Timeout de 15 segundos para o desafio
     if (challengeTimeoutRef.current) {
@@ -231,6 +341,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     challengeTimeoutRef.current = window.setTimeout(() => {
       log('warn', `⏰ Desafio ${nextChallengeType} expirou - próximo desafio`);
       setChallengeState('transitioning');
+      challengeStateRef.current = 'transitioning';
       setTimeout(() => startNextChallengeRef.current?.(), 1000);
     }, 15000);
   };
@@ -242,15 +353,24 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
   const completeCurrentChallengeRef = useRef<() => void>();
   
   completeCurrentChallengeRef.current = () => {
-    if (!currentChallenge || challengeCompleted || challengeState !== 'active') {
+    console.log('🔍 Verificação em completeCurrentChallenge:', {
+      currentChallengeRef: currentChallengeRef.current,
+      challengeCompletedRef: challengeCompletedRef.current,
+      challengeStateRef: challengeStateRef.current
+    });
+    
+    if (!currentChallengeRef.current || challengeCompletedRef.current || challengeStateRef.current !== 'active') {
+      console.log('⚠️ Condições não atendidas para completar desafio');
       return;
     }
 
     setChallengeCompleted(true);
+    challengeCompletedRef.current = true;
     setChallengeState('transitioning');
+    challengeStateRef.current = 'transitioning';
     const completionTime = Date.now() - challengeStartTime;
     
-    log('info', `✅ Desafio ${currentChallenge.type} completado em ${completionTime}ms! (${totalChallenges}/${maxChallenges})`);
+    log('info', `✅ Desafio ${currentChallengeRef.current?.type} completado em ${completionTime}ms! (${totalChallenges}/${maxChallenges})`);
     
     // Limpar timeout do desafio atual
     if (challengeTimeoutRef.current) {
@@ -262,7 +382,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: "challengeResponse",
-        challengeId: currentChallenge.id,
+        challengeId: currentChallengeRef.current?.id,
         completed: true,
         completionTime,
         timestamp: Date.now()
@@ -271,7 +391,9 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     
     // Aguardar 2 segundos antes do próximo desafio
     setTimeout(() => {
+      console.log('🔄 Transição para idle e próximo desafio');
       setChallengeState('idle');
+      challengeStateRef.current = 'idle';
       startNextChallengeRef.current?.();
     }, 2000);
   };
@@ -296,10 +418,20 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     
     // Gerar fila de desafios e iniciar primeiro após 2 segundos
     if (enableLivenessChallenge) {
+      log('info', '🎯 Gerando fila de desafios...');
       generateChallengeQueueRef.current();
       setTimeout(() => {
+        log('info', '🎯 Iniciando primeiro desafio...');
+        console.log('🔍 Estado antes de iniciar desafio:', {
+          challengeState,
+          totalChallenges,
+          currentChallenge: currentChallengeRef.current,
+          challengeStateRef: challengeStateRef.current
+        });
         startNextChallengeRef.current?.();
       }, 2000);
+    } else {
+      log('warn', '⚠️ enableLivenessChallenge está desabilitado');
     }
   }, [enableLivenessChallenge, maxChallenges, log]);
 
@@ -497,45 +629,55 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
       return;
     }
     if (enableClientHeuristics) {
-      const id = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const w = id.width, h = id.height;
-      const stepX = Math.max(1, Math.floor(w / 32));
-      const stepY = Math.max(1, Math.floor(h / 32));
-      const small = new Uint8ClampedArray(32 * 32);
-      let p = 0;
-      for (let yy = 0; yy < 32; yy++) {
-        for (let xx = 0; xx < 32; xx++) {
-          const x = xx * stepX;
-          const y = yy * stepY;
-          const i = (y * w + x) * 4;
-          const r = id.data[i] ?? 0;
-          const gch = id.data[i + 1] ?? 0;
-          const b = id.data[i + 2] ?? 0;
-          const g = (r * 0.299 + gch * 0.587 + b * 0.114) | 0;
-          small[p++] = g as number;
-        }
-      }
+      // Otimização: processar imagem apenas quando necessário
+      const shouldProcessImage = !isStandaloneMode || (frameCounterRef.current % 3 === 0); // A cada 3 frames em standalone
+      
+      let id: ImageData | undefined;
+      let w: number = canvas.width;
+      let h: number = canvas.height;
       let motionScore = 0;
-      if (lastSmallGrayRef.current) {
-        const prev = lastSmallGrayRef.current;
-        const len = Math.min(prev.length, small.length);
-        let acc = 0;
-        for (let i = 0; i < len; i++) {
-          const pv = prev[i] ?? 0;
-          const sv = small[i] ?? 0;
-          acc += Math.abs(pv - sv) / 255;
+      
+      if (shouldProcessImage) {
+        id = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        w = id.width;
+        h = id.height;
+        const stepX = Math.max(1, Math.floor(w / 32));
+        const stepY = Math.max(1, Math.floor(h / 32));
+        const small = new Uint8ClampedArray(32 * 32);
+        let p = 0;
+        for (let yy = 0; yy < 32; yy++) {
+          for (let xx = 0; xx < 32; xx++) {
+            const x = xx * stepX;
+            const y = yy * stepY;
+            const i = (y * w + x) * 4;
+            const r = id.data[i] ?? 0;
+            const gch = id.data[i + 1] ?? 0;
+            const b = id.data[i + 2] ?? 0;
+            const g = (r * 0.299 + gch * 0.587 + b * 0.114) | 0;
+            small[p++] = g as number;
+          }
         }
-        motionScore = acc / len;
+        if (lastSmallGrayRef.current) {
+          const prev = lastSmallGrayRef.current;
+          const len = Math.min(prev.length, small.length);
+          let acc = 0;
+          for (let i = 0; i < len; i++) {
+            const pv = prev[i] ?? 0;
+            const sv = small[i] ?? 0;
+            acc += Math.abs(pv - sv) / 255;
+          }
+          motionScore = acc / len;
+        }
+        lastSmallGrayRef.current = small;
       }
-      lastSmallGrayRef.current = small;
 
       let ahashHex: string | undefined;
       const n = (frameCounterRef.current = (frameCounterRef.current + 1) % 1000000);
-      if (n % (phashIntervalFrames || 5) === 0) {
+      if (n % (effectivePhashInterval || 5) === 0 && id) {
         ahashHex = computeAHash(id.data, w, h);
       }
 
-      if ((frameCounterRef.current % (detectionIntervalFrames || 2)) === 0) {
+      if ((frameCounterRef.current % (effectiveDetectionInterval || 2)) === 0) {
         if (mpDetectorRef.current && mpLandmarkerRef.current && mpVisionRef.current) {
           // Validar se o vídeo está pronto e tem dimensões válidas
           if (!video || !video.videoWidth || !video.videoHeight || video.videoWidth === 0 || video.videoHeight === 0) {
@@ -565,13 +707,49 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
                 const landmarks = landmarkRes.faceLandmarks[0];
                 landmarksRef.current = landmarks;
                 
-                // Analisar gestos se há desafio ativo
-                if (currentChallenge && enableLivenessChallenge && challengeState === 'active') {
+                // Debug: verificar se temos desafio ativo (via refs para evitar stale state)
+                const dbgCurrent = currentChallengeRef.current;
+                const dbgState = challengeStateRef.current;
+                const dbgCompleted = challengeCompletedRef.current;
+                const dbgEnabled = enableLivenessChallengeRef.current;
+                console.log("🎯 Debug análise gestos:", {
+                  hasChallenge: !!dbgCurrent,
+                  challengeType: dbgCurrent?.type,
+                  challengeState: dbgState,
+                  enableLivenessChallenge: dbgEnabled,
+                  challengeCompleted: dbgCompleted,
+                  landmarksCount: landmarks.length
+                });
+                
+                // Analisar gestos se há desafio ativo (usando refs para consistência no loop)
+                if (dbgCurrent && dbgEnabled && dbgState === 'active') {
+                  console.log("🎯 Iniciando análise de gesto para:", {
+                    challengeType: dbgCurrent.type,
+                    challengeId: dbgCurrent.id,
+                    landmarksCount: landmarks.length
+                  });
+                  
                   const gestureDetected = analyzeGesture(landmarks);
-                  if (gestureDetected && !challengeCompleted) {
+                  console.log("👁️ Gesto analisado:", {
+                    challengeType: dbgCurrent.type,
+                    gestureDetected,
+                    challengeCompleted: dbgCompleted
+                  });
+                  
+                  if (gestureDetected && !dbgCompleted) {
+                    console.log("✅ Gesto detectado! Completando desafio...");
                     completeCurrentChallenge();
                   }
+                } else {
+                  console.log("⚠️ Condições não atendidas para análise:", {
+                    hasChallenge: !!dbgCurrent,
+                    challengeEnabled: dbgEnabled,
+                    challengeState: dbgState,
+                    challengeCompleted: dbgCompleted
+                  });
                 }
+              } else {
+                landmarksRef.current = null;
               }
               
               console.log("🔍 MediaPipe detectou face:", { present, box, landmarks: !!landmarksRef.current });
@@ -634,15 +812,17 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
         reader.readAsArrayBuffer(blob);
       }, "image/jpeg", 0.7);
     }
-  }, [enableClientHeuristics, maxFps, minMotionScore, phashIntervalFrames, send, targetFps, detectionIntervalFrames, bypassValidation, enableLivenessChallenge, analyzeGesture, log, standaloneMode]);
+  }, [enableClientHeuristics, effectiveMaxFps, minMotionScore, effectivePhashInterval, send, targetFps, effectiveDetectionInterval, bypassValidation, enableLivenessChallenge, analyzeGesture, log, standaloneMode]);
 
   const start = useCallback(async () => {
+    console.log('🔥 FUNÇÃO START CHAMADA!!! initializationRef.current:', initializationRef.current);
+    
     if (initializationRef.current) {
-      log('warn', '⚠️ Sistema já foi inicializado - ignorando nova tentativa');
+      console.log('⚠️ Sistema já foi inicializado - ignorando nova tentativa');
       return;
     }
     
-    log('info', '🚀 Iniciando sistema - primeira vez', { 
+    console.log('🚀 Iniciando sistema - primeira vez DIRETO!', { 
       sessionId: sessionId || 'vazio', 
       token: token || 'vazio',
       backendUrl: backendUrl || 'vazio',
@@ -652,6 +832,36 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     });
     
     initializationRef.current = true;
+    
+    // ✨ VERIFICAÇÃO STANDALONE PRIORITÁRIA (ANTES DE TUDO)
+    const hasNoBackend = !sessionId || sessionId === "" || !token || token === "";
+    console.log('🎯 VERIFICAÇÃO STANDALONE PRIORITÁRIA DIRETO!', {
+      enableLivenessChallenge,
+      hasNoBackend,
+      standaloneInitialized: standaloneInitialized.current,
+      shouldStart: enableLivenessChallenge && hasNoBackend && !standaloneInitialized.current
+    });
+    
+    if (enableLivenessChallenge && hasNoBackend && !standaloneInitialized.current) {
+      console.log('🚀 ✨ INICIANDO STANDALONE PRIORITÁRIO - MEDIAPIPE SERÁ CARREGADO!');
+      standaloneInitialized.current = true;
+      setStandaloneMode(true);
+      setStatus("streaming");
+      setChallengeState('idle');
+      setTotalChallenges(0);
+      
+      setTimeout(() => {
+        console.log('🎯 Gerando fila de desafios prioritário...');
+        generateChallengeQueueRef.current();
+        setTimeout(() => {
+          console.log('🎯 Iniciando primeiro desafio prioritário...');
+          startNextChallengeRef.current?.();
+        }, 2000);
+      }, 1000);
+      
+      // NÃO FAZER RETURN - CONTINUAR PARA CARREGAR CÂMERA (mas pular MediaPipe)
+      console.log('📷 Continuando para carregar câmera...');
+    }
     setError(undefined);
     setStatus("connecting");
 
@@ -687,7 +897,14 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
           }
         });
       }
+      console.log('🔍 Verificando carregamento MediaPipe:', { 
+        bypassValidation, 
+        standaloneMode: standaloneInitialized.current,
+        shouldLoadMediaPipe: !bypassValidation 
+      });
+      
       if (!bypassValidation) {
+        log('info', '🔧 Iniciando carregamento do MediaPipe (bypassValidation=false)');
         try {
           await (async () => {
             const mod: any = await import("@mediapipe/tasks-vision");
@@ -749,32 +966,19 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
             
             mpLandmarkerRef.current = landmarker;
             
-            // Se temos MediaPipe carregado e não tem backend configurado, iniciar modo standalone
+            // ✨ VERIFICAÇÃO STANDALONE APÓS MEDIAPIPE CARREGAR
             const hasNoBackend = !sessionId || sessionId === "" || !token || token === "";
-            log('info', '🎯 Verificando condições para modo standalone', { 
-              sessionId: sessionId || 'vazio', 
-              token: token || 'vazio',
-              hasDetector: !!detector,
-              hasLandmarker: !!landmarker,
+            console.log('🚀 MEDIAPIPE CARREGADO! Verificando standalone...', {
+              detector: !!detector,
+              landmarker: !!landmarker,
               enableLivenessChallenge,
-              hasNoBackend
+              hasNoBackend,
+              standaloneInitialized: standaloneInitialized.current
             });
             
-            if (detector && landmarker && enableLivenessChallenge && hasNoBackend) {
-              log('info', '🎯 Iniciando modo standalone - sem backend configurado', {
-                detector: !!detector,
-                landmarker: !!landmarker,
-                enableLivenessChallenge,
-                hasNoBackend,
-                standaloneInitialized: standaloneInitialized.current
-              });
-              
-              if (!standaloneInitialized.current) {
-                setTimeout(() => {
-                  startStandaloneMode();
-                }, 500);
-              }
-              return; // Não executar o resto da lógica de preparação
+            if (detector && landmarker && enableLivenessChallenge && hasNoBackend && standaloneInitialized.current) {
+              console.log('🎯 ✨ MEDIAPIPE + STANDALONE - CONTINUANDO COM DESAFIOS!');
+              // Não fazer return - continuar o fluxo normal mas com standalone ativo
             }
           })();
         } catch (e) {
@@ -791,7 +995,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
           }
         }
       } else {
-        log('info', "🔄 Modo bypass ativado - MediaPipe desabilitado");
+        console.log("🔄 MediaPipe pulado - modo bypass ou standalone ativo");
         
         // Se está em bypass e não tem backend, ainda pode fazer demonstração
         const hasNoBackend = !sessionId || sessionId === "" || !token || token === "";
@@ -803,6 +1007,8 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
           return;
         }
       }
+
+      // Verificação standalone já foi feita acima, após MediaPipe carregar
 
       preparingRef.current = true;
       readyCountRef.current = 0;
@@ -937,7 +1143,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
       streamingRef.current = false;
       return;
     }
-  }, [wsUrl, send, sessionId, token, videoConstraints, captureAndSendFrame, bypassValidation, enableLivenessChallenge, startStandaloneMode]);
+  }, [wsUrl, send, sessionId, token, videoConstraints, captureAndSendFrame, bypassValidation, enableLivenessChallenge, startStandaloneMode, effectiveMaxFps]);
 
   const stop = useCallback(async () => {
     log('info', '🛑 Parando sistema completamente');

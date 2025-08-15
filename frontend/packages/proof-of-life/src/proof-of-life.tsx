@@ -129,14 +129,18 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
     const initializeComponent = async () => {
       if (isMounted) {
         try {
+          console.log('🔥 CHAMANDO start() AGORA...');
           await start();
           console.log('✅ ProofOfLife iniciado com sucesso');
         } catch (error) {
           console.error('❌ Erro ao iniciar ProofOfLife:', error);
         }
+      } else {
+        console.log('❌ isMounted é false, não chamando start()');
       }
     };
     
+    console.log('🔥 Executando initializeComponent...');
     initializeComponent();
     
     return () => {
