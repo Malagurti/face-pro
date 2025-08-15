@@ -168,6 +168,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
   const currentBufferRef = useRef<ChallengeDataBuffer | null>(null);
   const buffersHistoryRef = useRef<ChallengeDataBuffer[]>([]);
   const [bufferingMode, setBufferingMode] = useState<boolean>(false);
+  const bufferingModeRef = useRef<boolean>(false);
   const [bufferStats, setBufferStats] = useState<{
     currentFrames: number;
     currentSizeKB: number;
@@ -309,6 +310,8 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
 
   // Funções para gerenciar buffer de dados
   const createChallengeBuffer = useCallback((challenge: { type: 'look_right' | 'look_left' | 'look_up' | 'open_mouth'; id: string }) => {
+    console.log('🔧 createChallengeBuffer chamado com:', challenge);
+    
     const buffer: ChallengeDataBuffer = {
       challengeId: challenge.id,
       challengeType: challenge.type,
@@ -323,6 +326,13 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     };
     
     currentBufferRef.current = buffer;
+    console.log('📦 Buffer criado e armazenado em currentBufferRef:', {
+      challengeId: buffer.challengeId,
+      type: buffer.challengeType,
+      status: buffer.status,
+      hasCurrentBuffer: !!currentBufferRef.current
+    });
+    
     log('info', '📦 Buffer criado para desafio', { challengeId: challenge.id, type: challenge.type });
     
     return buffer;
@@ -341,6 +351,11 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
   const addFrameToBuffer = useCallback((frameData: ChallengeFrameData) => {
     const buffer = currentBufferRef.current;
     if (!buffer || buffer.status !== 'active') {
+      console.log('⚠️ addFrameToBuffer falhou:', {
+        hasBuffer: !!buffer,
+        bufferStatus: buffer?.status,
+        challengeId: buffer?.challengeId
+      });
       return false;
     }
 
@@ -683,6 +698,8 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     if (enableDataBuffering) {
       createChallengeBuffer(newChallenge);
       setBufferingMode(true);
+      bufferingModeRef.current = true;
+      console.log('🔧 setBufferingMode(true) chamado para desafio:', newChallenge.id);
       log('info', '📦 Modo buffering ativado para desafio', { 
         challengeId: newChallenge.id,
         mode: isStandaloneMode ? 'standalone' : 'backend'
@@ -718,6 +735,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
         completeBuffer(false); // false = falhou
         clearCurrentBuffer();
         setBufferingMode(false);
+        bufferingModeRef.current = false;
         log('info', '🗑️ Buffer descartado devido ao timeout do desafio', {
           mode: isStandaloneMode ? 'standalone' : 'backend'
         });
@@ -787,6 +805,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
       }
       clearCurrentBuffer();
       setBufferingMode(false);
+      bufferingModeRef.current = false;
     } else {
       // Modo tradicional: enviar resultado individual para o backend (se conectado)
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -897,8 +916,41 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     if (!ctx) return;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    // Verificar se devemos usar buffer ou enviar diretamente
-    const shouldBuffer = enableDataBuffering && !isStandaloneMode && bufferingMode && currentBufferRef.current;
+          // Verificar se devemos usar buffer ou enviar diretamente
+      const shouldBuffer = enableDataBuffering && bufferingModeRef.current && currentBufferRef.current;
+      
+      // Debug mais frequente para identificar o problema
+      if (frameCounterRef.current % 10 === 0) {
+        console.log('🔍 shouldBuffer debug (a cada 10 frames):', {
+          enableDataBuffering,
+          bufferingMode,
+          bufferingModeRef: bufferingModeRef.current,
+          hasCurrentBuffer: !!currentBufferRef.current,
+          shouldBuffer,
+          frameCounter: frameCounterRef.current
+        });
+      }
+      
+      // Debug detalhado da lógica de buffer
+      if (frameCounterRef.current % 30 === 0) {
+        console.log('🔍 Debug lógica de buffer (console):', {
+          enableDataBuffering,
+          bufferingMode,
+          bufferingModeRef: bufferingModeRef.current,
+          hasCurrentBuffer: !!currentBufferRef.current,
+          shouldBuffer,
+          challengeId: currentBufferRef.current?.challengeId,
+          bufferStatus: currentBufferRef.current?.status
+        });
+        log('info', '🔍 Debug lógica de buffer:', {
+          enableDataBuffering,
+          bufferingMode,
+          hasCurrentBuffer: !!currentBufferRef.current,
+          shouldBuffer,
+          challengeId: currentBufferRef.current?.challengeId,
+          bufferStatus: currentBufferRef.current?.status
+        });
+      }
 
     if (bypassValidation) {
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -1648,6 +1700,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     currentBufferRef.current = null;
     buffersHistoryRef.current = [];
     setBufferingMode(false);
+    bufferingModeRef.current = false;
     
     log('info', '✅ Sistema parado completamente');
   }, [log]);
