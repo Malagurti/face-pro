@@ -1,15 +1,23 @@
 import React, { useEffect, useMemo, useRef } from "react";
 import { useProofOfLife, UseProofOfLifeOptions } from "./useProofOfLife";
 
-function getInstructionText(challenge: string): string {
-  switch (challenge) {
-    case "blink": return "Pisque os olhos naturalmente";
-    case "open-mouth": return "Abra a boca";
-    case "turn-left": return "Vire a cabeça para a esquerda";
-    case "turn-right": return "Vire a cabeça para a direita";
-    case "head-up": return "Levante a cabeça";
-    case "head-down": return "Abaixe a cabeça";
-    default: return challenge;
+function getInstructionText(challengeType: string): string {
+  switch (challengeType) {
+    case "look_right": return "Olhe para a direita";
+    case "look_left": return "Olhe para a esquerda";
+    case "look_up": return "Olhe para cima";
+    case "open_mouth": return "Abra a boca";
+    default: return challengeType;
+  }
+}
+
+function getChallengeEmoji(challengeType: string): string {
+  switch (challengeType) {
+    case "look_right": return "➡️";
+    case "look_left": return "⬅️";
+    case "look_up": return "⬆️";
+    case "open_mouth": return "😮";
+    default: return "🎯";
   }
 }
 
@@ -19,20 +27,79 @@ export type ProofOfLifeProps = UseProofOfLifeOptions & {
   debug?: boolean;
 };
 
+interface ProgressRingProps {
+  progress: number; // 0-100
+  color: string;
+  size: number;
+  strokeWidth: number;
+}
+
+const ProgressRing: React.FC<ProgressRingProps> = ({ progress, color, size, strokeWidth }) => {
+  const radius = (size - strokeWidth) / 2;
+  const circumference = radius * 2 * Math.PI;
+  const offset = circumference - (progress / 100) * circumference;
+
+  return (
+    <svg
+      width={size}
+      height={size}
+      style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%) rotate(-90deg)' }}
+    >
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={radius}
+        stroke="rgba(255,255,255,0.2)"
+        strokeWidth={strokeWidth}
+        fill="transparent"
+      />
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={radius}
+        stroke={color}
+        strokeWidth={strokeWidth}
+        fill="transparent"
+        strokeDasharray={circumference}
+        strokeDashoffset={offset}
+        strokeLinecap="round"
+        style={{ transition: 'stroke-dashoffset 0.3s ease' }}
+      />
+    </svg>
+  );
+};
+
 export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifeProps) {
   const vidRef = useRef<HTMLVideoElement>(null);
-  const { status, start, stop, lastPrompt, error, rttMs, throttled, targetFps, lastAckAt, faceBox, guide } = useProofOfLife(props);
+  const { status, start, stop, lastPrompt, error, rttMs, throttled, targetFps, lastAckAt, faceBox, currentChallenge, challengeCompleted, standaloneMode, challengeStartTime } = useProofOfLife(props);
   const debug = props.debug ?? false;
 
   const ringColor = useMemo(() => {
     if (status === "passed") return "#10b981";
     if (status === "failed") return "#ef4444";
-    if (guide?.level === "ok") return "#3b82f6";
-    if (guide?.level === "warn") return "#f59e0b";
-    if (guide?.level === "error") return "#ef4444";
-    if (status === "prompt") return "#f59e0b";
+    if (currentChallenge && !challengeCompleted) return "#f59e0b";
+    if (currentChallenge && challengeCompleted) return "#10b981";
+    if (status === "streaming") return "#3b82f6";
     return "#374151";
-  }, [status, guide]);
+  }, [status, currentChallenge, challengeCompleted]);
+
+  const progress = useMemo(() => {
+    if (status === "passed") return 100;
+    if (status === "failed") return 0;
+    if (status === "connecting") return 20;
+    if (status === "streaming" && !currentChallenge) return 60;
+    if (currentChallenge && !challengeCompleted) {
+      // Progresso baseado no tempo do desafio (10 segundos máximo)
+      if (challengeStartTime) {
+        const elapsed = Date.now() - challengeStartTime;
+        const timeProgress = Math.min(elapsed / 10000, 1) * 25; // 25% do progresso baseado no tempo
+        return 75 + timeProgress;
+      }
+      return 75;
+    }
+    if (currentChallenge && challengeCompleted) return 100;
+    return 0;
+  }, [status, currentChallenge, challengeCompleted, challengeStartTime]);
 
   useEffect(() => {
     start();
@@ -54,35 +121,51 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
     height: 320,
     borderRadius: "50% / 60%",
     overflow: "hidden",
-    boxShadow: `0 0 0 3px ${ringColor}`,
     background: "black",
   };
 
-  const promptText = useMemo(() => {
-    if (!lastPrompt) return undefined;
-    const map: Record<string, string> = {
-      blink: "Piscar os olhos",
-      "open-mouth": "Abra a boca",
-      "turn-left": "Vire a cabeça para a esquerda",
-      "turn-right": "Vire a cabeça para a direita",
-      "head-up": "Levante a cabeça",
-      "head-down": "Abaixe a cabeça",
-      smile: "Sorria",
-    };
-    return map[lastPrompt.kind] ?? lastPrompt.kind;
-  }, [lastPrompt]);
+  const containerStyle: React.CSSProperties = {
+    position: "relative",
+    width: 250,
+    height: 330,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center"
+  };
+
+
 
   return (
     <div style={{ display: "grid", gap: 8 }}>
-      <div style={maskStyle}>
-        <video ref={vidRef} data-proof-of-life autoPlay playsInline muted width={240} height={320} style={{ objectFit: "cover", width: "100%", height: "100%" }} />
+      <div style={containerStyle}>
+        <ProgressRing 
+          progress={progress} 
+          color={ringColor} 
+          size={250} 
+          strokeWidth={6} 
+        />
+        <div style={maskStyle}>
+          <video ref={vidRef} data-proof-of-life autoPlay playsInline muted width={240} height={320} style={{ objectFit: "cover", width: "100%", height: "100%" }} />
 
-        {guide && guide.message && (
-          <div style={{ position: "absolute", bottom: 8, left: 8, right: 8, textAlign: "center", color: guide.level === "ok" ? "#3b82f6" : guide.level === "warn" ? "#f59e0b" : "#ef4444", fontWeight: 600, textShadow: "0 1px 2px rgba(0,0,0,0.6)" }}>{guide.message}</div>
-        )}
+          {currentChallenge && (
+            <div style={{ 
+              position: "absolute", 
+              bottom: 8, 
+              left: 8, 
+              right: 8, 
+              textAlign: "center", 
+              color: challengeCompleted ? "#10b981" : "#f59e0b", 
+              fontWeight: 600, 
+              textShadow: "0 1px 2px rgba(0,0,0,0.6)" 
+            }}>
+              {challengeCompleted ? "✅ Completado!" : `${getChallengeEmoji(currentChallenge.type)} ${getInstructionText(currentChallenge.type)}`}
+            </div>
+          )}
+        </div>
       </div>
       {debug && (<div>status: {status} {throttled ? <span style={{ color: "#f59e0b" }}>(throttle)</span> : null}</div>)}
       {debug && (<div style={{ fontSize: 12, color: "#9ca3af" }}>targetFps: {targetFps}{rttMs !== undefined ? ` · rtt: ${rttMs}ms` : ""}{lastAckAt ? ` · last: ${new Date(lastAckAt).toLocaleTimeString()}` : ""}</div>)}
+      {debug && (<div style={{ fontSize: 12, color: "#9ca3af" }}>challenge: {currentChallenge?.type || 'none'} · completed: {challengeCompleted ? 'yes' : 'no'} · bypass: {props.bypassValidation ? 'yes' : 'no'} · standalone: {standaloneMode ? 'yes' : 'no'}</div>)}
       {props.bypassValidation && status === "streaming" && (
         <div style={{ 
           fontSize: 16, 
@@ -107,12 +190,12 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
           </div>
         </div>
       )}
-      {promptText && status !== "passed" && status !== "failed" && !props.bypassValidation && (
+      {standaloneMode && status === "streaming" && (
         <div style={{ 
           fontSize: 16, 
           fontWeight: "bold", 
           padding: "12px",
-          backgroundColor: "rgba(0,0,0,0.8)",
+          backgroundColor: "rgba(59, 130, 246, 0.8)",
           color: "white",
           borderRadius: "12px",
           textAlign: "center",
@@ -120,14 +203,38 @@ export const ProofOfLife = React.memo(function ProofOfLife(props: ProofOfLifePro
           boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
           border: "2px solid #3b82f6"
         }}>
-          🎯 {getInstructionText(promptText)}
+          🧪 Modo Teste Standalone
           <div style={{ 
             fontSize: 12, 
             marginTop: "6px", 
             opacity: 0.8,
             color: "#93c5fd"
           }}>
-            Execute o movimento solicitado
+            Testando detecção de gestos com MediaPipe
+          </div>
+        </div>
+      )}
+      {currentChallenge && status !== "passed" && status !== "failed" && !props.bypassValidation && (
+        <div style={{ 
+          fontSize: 16, 
+          fontWeight: "bold", 
+          padding: "12px",
+          backgroundColor: challengeCompleted ? "rgba(16, 185, 129, 0.8)" : "rgba(0,0,0,0.8)",
+          color: "white",
+          borderRadius: "12px",
+          textAlign: "center",
+          margin: "10px 0",
+          boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+          border: challengeCompleted ? "2px solid #10b981" : "2px solid #3b82f6"
+        }}>
+          {challengeCompleted ? "✅ Desafio Completado!" : `🎯 ${getInstructionText(currentChallenge.type)}`}
+          <div style={{ 
+            fontSize: 12, 
+            marginTop: "6px", 
+            opacity: 0.8,
+            color: challengeCompleted ? "#6ee7b7" : "#93c5fd"
+          }}>
+            {challengeCompleted ? "Aguarde o próximo desafio..." : "Execute o movimento solicitado"}
           </div>
         </div>
       )}

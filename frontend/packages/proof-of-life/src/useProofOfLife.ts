@@ -11,10 +11,7 @@ export interface UseProofOfLifeOptions {
   enableClientHeuristics?: boolean;
   minMotionScore?: number;
   phashIntervalFrames?: number;
-  enablePositionGuide?: boolean;
-  minFaceAreaRatio?: number;
-  maxFaceAreaRatio?: number;
-  centerTolerance?: number;
+  enableLivenessChallenge?: boolean;
   detectionIntervalFrames?: number;
   bypassValidation?: boolean;
   onLog?: (level: 'info' | 'warn' | 'error', message: string, data?: any) => void;
@@ -32,11 +29,14 @@ export interface UseProofOfLifeResult {
   lastAckAt?: number;
   facePresent?: boolean;
   faceBox?: { x: number; y: number; width: number; height: number };
-  guide?: { level: "ok" | "warn" | "error"; message?: string; reason?: string };
+  currentChallenge?: { type: 'look_right' | 'look_left' | 'look_up' | 'open_mouth'; id: string };
+  challengeCompleted?: boolean;
+  standaloneMode?: boolean;
+  challengeStartTime?: number;
 }
 
 export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResult {
-  const { backendUrl, sessionId, token, videoConstraints, maxFps = 15, enableClientHeuristics = true, minMotionScore = 0.02, phashIntervalFrames = 5, enablePositionGuide = true, minFaceAreaRatio = 0.12, maxFaceAreaRatio = 0.6, centerTolerance = 0.12, detectionIntervalFrames = 2, bypassValidation = false, onLog } = opts;
+  const { backendUrl, sessionId, token, videoConstraints, maxFps = 15, enableClientHeuristics = true, minMotionScore = 0.02, phashIntervalFrames = 5, enableLivenessChallenge = true, detectionIntervalFrames = 2, bypassValidation = false, onLog } = opts;
   const [status, setStatus] = useState<Status>("idle");
   const [lastPrompt, setLastPrompt] = useState<UseProofOfLifeResult["lastPrompt"]>();
   const [error, setError] = useState<string | undefined>();
@@ -55,13 +55,101 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
   const lastSmallGrayRef = useRef<Uint8ClampedArray | null>(null);
   const frameCounterRef = useRef<number>(0);
   const mpDetectorRef = useRef<any>(null);
+  const mpLandmarkerRef = useRef<any>(null);
   const mpVisionRef = useRef<any>(null);
   const [facePresent, setFacePresent] = useState<boolean | undefined>(undefined);
   const [faceBox, setFaceBox] = useState<{ x: number; y: number; width: number; height: number } | undefined>(undefined);
-  const [guide, setGuide] = useState<{ level: "ok" | "warn" | "error"; message?: string; reason?: string } | undefined>(undefined);
+  const [currentChallenge, setCurrentChallenge] = useState<{ type: 'look_right' | 'look_left' | 'look_up' | 'open_mouth'; id: string } | undefined>(undefined);
+  const [challengeCompleted, setChallengeCompleted] = useState<boolean>(false);
+  const [standaloneMode, setStandaloneMode] = useState<boolean>(false);
+  const [challengeStartTime, setChallengeStartTime] = useState<number>(0);
+  const challengeTimeoutRef = useRef<number | null>(null);
   const challengeCountRef = useRef<number>(0);
+  const landmarksRef = useRef<any>(null);
 
   const wsUrl = useMemo(() => backendUrl.replace(/^http/, "ws") + "/ws", [backendUrl]);
+
+  // Analisadores de gestos
+  const analyzeLookRight = useCallback((landmarks: any) => {
+    if (!landmarks || landmarks.length === 0) return false;
+    
+    const leftEye = landmarks[33]; // Canto esquerdo do olho esquerdo
+    const rightEye = landmarks[362]; // Canto direito do olho direito
+    const noseTip = landmarks[1]; // Ponta do nariz
+    
+    if (!leftEye || !rightEye || !noseTip) return false;
+    
+    // Calcular se a cabeça está virada para a direita
+    const eyeCenter = { x: (leftEye.x + rightEye.x) / 2, y: (leftEye.y + rightEye.y) / 2 };
+    const noseOffset = noseTip.x - eyeCenter.x;
+    
+    return noseOffset > 0.03; // Threshold para detectar movimento à direita
+  }, []);
+
+  const analyzeLookLeft = useCallback((landmarks: any) => {
+    if (!landmarks || landmarks.length === 0) return false;
+    
+    const leftEye = landmarks[33];
+    const rightEye = landmarks[362];
+    const noseTip = landmarks[1];
+    
+    if (!leftEye || !rightEye || !noseTip) return false;
+    
+    const eyeCenter = { x: (leftEye.x + rightEye.x) / 2, y: (leftEye.y + rightEye.y) / 2 };
+    const noseOffset = noseTip.x - eyeCenter.x;
+    
+    return noseOffset < -0.03; // Threshold para detectar movimento à esquerda
+  }, []);
+
+  const analyzeLookUp = useCallback((landmarks: any) => {
+    if (!landmarks || landmarks.length === 0) return false;
+    
+    const eyebrowLeft = landmarks[70]; // Sobrancelha esquerda
+    const eyebrowRight = landmarks[107]; // Sobrancelha direita
+    const chinBottom = landmarks[175]; // Parte inferior do queixo
+    
+    if (!eyebrowLeft || !eyebrowRight || !chinBottom) return false;
+    
+    const eyebrowCenter = { x: (eyebrowLeft.x + eyebrowRight.x) / 2, y: (eyebrowLeft.y + eyebrowRight.y) / 2 };
+    const faceHeight = Math.abs(chinBottom.y - eyebrowCenter.y);
+    
+    // Detectar se a cabeça está levantada (face comprimida verticalmente)
+    return faceHeight < 0.15; // Threshold para detectar cabeça para cima
+  }, []);
+
+  const analyzeOpenMouth = useCallback((landmarks: any) => {
+    if (!landmarks || landmarks.length === 0) return false;
+    
+    const upperLip = landmarks[13]; // Lábio superior
+    const lowerLip = landmarks[14]; // Lábio inferior
+    const mouthLeft = landmarks[308]; // Canto esquerdo da boca
+    const mouthRight = landmarks[78]; // Canto direito da boca
+    
+    if (!upperLip || !lowerLip || !mouthLeft || !mouthRight) return false;
+    
+    const mouthHeight = Math.abs(lowerLip.y - upperLip.y);
+    const mouthWidth = Math.abs(mouthRight.x - mouthLeft.x);
+    const mouthAspectRatio = mouthHeight / mouthWidth;
+    
+    return mouthAspectRatio > 0.5; // Threshold para detectar boca aberta
+  }, []);
+
+  const analyzeGesture = useCallback((landmarks: any) => {
+    if (!currentChallenge || !landmarks) return false;
+    
+    switch (currentChallenge.type) {
+      case 'look_right':
+        return analyzeLookRight(landmarks);
+      case 'look_left':
+        return analyzeLookLeft(landmarks);
+      case 'look_up':
+        return analyzeLookUp(landmarks);
+      case 'open_mouth':
+        return analyzeOpenMouth(landmarks);
+      default:
+        return false;
+    }
+  }, [currentChallenge, analyzeLookRight, analyzeLookLeft, analyzeLookUp, analyzeOpenMouth]);
 
   const logRef = useRef(onLog);
   logRef.current = onLog;
@@ -73,7 +161,67 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
       const logFn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
       logFn(message, data || '');
     }
-  }, []); // Dependências vazias para evitar recriação
+  }, []);
+
+  // Sistema de desafios aleatórios para demonstração
+  const generateRandomChallenge = useCallback(() => {
+    const challenges: Array<'look_right' | 'look_left' | 'look_up' | 'open_mouth'> = ['look_right', 'look_left', 'look_up', 'open_mouth'];
+    const randomType = challenges[Math.floor(Math.random() * challenges.length)] as 'look_right' | 'look_left' | 'look_up' | 'open_mouth';
+    const challengeId = `challenge_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    
+    const newChallenge = {
+      type: randomType,
+      id: challengeId
+    };
+    
+    setCurrentChallenge(newChallenge);
+    setChallengeCompleted(false);
+    setChallengeStartTime(Date.now());
+    log('info', `🎯 Novo desafio gerado: ${randomType}`, { id: challengeId });
+    
+    // Timeout de 10 segundos para o desafio
+    if (challengeTimeoutRef.current) {
+      clearTimeout(challengeTimeoutRef.current);
+    }
+    
+    challengeTimeoutRef.current = window.setTimeout(() => {
+      log('warn', `⏰ Desafio ${randomType} expirou sem ser completado`);
+      generateRandomChallenge(); // Gerar próximo desafio
+    }, 10000);
+    
+    return newChallenge;
+  }, [log]);
+
+  // Função para iniciar modo standalone (sem backend)
+  const startStandaloneMode = useCallback(() => {
+    setStandaloneMode(true);
+    setStatus("streaming");
+    log('info', '🚀 Modo standalone iniciado - desafios serão gerados automaticamente');
+    
+    // Gerar primeiro desafio imediatamente para teste
+    if (enableLivenessChallenge) {
+      setTimeout(() => {
+        generateRandomChallenge();
+      }, 1000);
+      
+      // Simular completar desafios a cada 5 segundos para demonstração
+      let challengeCounter = 0;
+      const demoInterval = setInterval(() => {
+        challengeCounter++;
+        if (challengeCounter <= 4) { // Apenas 4 demonstrações
+          log('info', `🎯 [DEMO] Simulando conclusão do desafio ${challengeCounter}`);
+          setChallengeCompleted(true);
+          
+          setTimeout(() => {
+            generateRandomChallenge();
+          }, 2000);
+        } else {
+          clearInterval(demoInterval);
+          log('info', '🎯 [DEMO] Demonstração concluída');
+        }
+      }, 5000);
+    }
+  }, [enableLivenessChallenge, generateRandomChallenge, log]); // Dependências vazias para evitar recriação
 
   const send = useCallback((msg: unknown) => {
     const ws = wsRef.current;
@@ -308,73 +456,92 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
       }
 
       if ((frameCounterRef.current % (detectionIntervalFrames || 2)) === 0) {
-        if (mpDetectorRef.current && mpVisionRef.current) {
+        if (mpDetectorRef.current && mpLandmarkerRef.current && mpVisionRef.current) {
+          // Validar se o vídeo está pronto e tem dimensões válidas
+          if (!video || !video.videoWidth || !video.videoHeight || video.videoWidth === 0 || video.videoHeight === 0) {
+            console.log("🚫 Vídeo não está pronto para MediaPipe:", { 
+              width: video?.videoWidth, 
+              height: video?.videoHeight,
+              readyState: video?.readyState 
+            });
+            return;
+          }
+
           try {
-            const res = mpDetectorRef.current.detectForVideo(video, now);
+            // Detecção facial
+            const detectionRes = mpDetectorRef.current.detectForVideo(video, now);
             let present = false;
             let box: { x: number; y: number; width: number; height: number } | undefined;
-            if (res && res.detections && res.detections.length > 0) {
+            
+            if (detectionRes && detectionRes.detections && detectionRes.detections.length > 0) {
               present = true;
-              const d = res.detections[0];
+              const d = detectionRes.detections[0];
               const bb = d.boundingBox;
               box = { x: Math.round(bb.originX), y: Math.round(bb.originY), width: Math.round(bb.width), height: Math.round(bb.height) };
-              console.log("🔍 MediaPipe detectou face:", { present, box });
-            } else {
-              console.log("🔍 MediaPipe: nenhuma face detectada");
-            }
-            setFacePresent(present);
-            setFaceBox(box);
-            
-            if (enablePositionGuide) {
-              const vw = video.videoWidth || 320;
-              const vh = video.videoHeight || 240;
               
-              if (!present) {
-                setGuide({ level: "error", message: "Posicione seu rosto na frente da câmera", reason: "no_face" });
-              } else if (box) {
-                const area = box.width * box.height;
-                const areaRatio = area / (vw * vh);
-                const cx = box.x + box.width / 2;
-                const cy = box.y + box.height / 2;
-                const dx = Math.abs(cx - vw / 2) / vw;
-                const dy = Math.abs(cy - vh / 2) / vh;
+              // Face Landmarks quando face detectada
+              const landmarkRes = mpLandmarkerRef.current.detectForVideo(video, now);
+              if (landmarkRes && landmarkRes.faceLandmarks && landmarkRes.faceLandmarks.length > 0) {
+                const landmarks = landmarkRes.faceLandmarks[0];
+                landmarksRef.current = landmarks;
                 
-                if (areaRatio < minFaceAreaRatio) {
-                  setGuide({ level: "warn", message: "Aproxime-se da câmera", reason: "too_far" });
-                } else if (areaRatio > maxFaceAreaRatio) {
-                  setGuide({ level: "warn", message: "Afaste-se da câmera", reason: "too_close" });
-                } else if (dx > centerTolerance) {
-                  if (cx > vw / 2) {
-                    setGuide({ level: "warn", message: "Mova-se para a esquerda", reason: "face_right" });
-                  } else {
-                    setGuide({ level: "warn", message: "Mova-se para a direita", reason: "face_left" });
+                // Analisar gestos se há desafio ativo
+                if (currentChallenge && enableLivenessChallenge) {
+                  const gestureDetected = analyzeGesture(landmarks);
+                  if (gestureDetected && !challengeCompleted) {
+                    setChallengeCompleted(true);
+                    const completionTime = Date.now() - challengeStartTime;
+                    log('info', `🎯 Desafio ${currentChallenge.type} completado em ${completionTime}ms!`);
+                    
+                    // Limpar timeout do desafio atual
+                    if (challengeTimeoutRef.current) {
+                      clearTimeout(challengeTimeoutRef.current);
+                      challengeTimeoutRef.current = null;
+                    }
+                    
+                    // Enviar resultado para o backend (se conectado)
+                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                      wsRef.current.send(JSON.stringify({
+                        type: "challengeResponse",
+                        challengeId: currentChallenge.id,
+                        completed: true,
+                        completionTime,
+                        timestamp: now
+                      }));
+                    }
+                    
+                    // Gerar próximo desafio após 3 segundos
+                    setTimeout(() => {
+                      log('info', '🎯 Gerando próximo desafio...');
+                      if (standaloneMode || (wsRef.current && wsRef.current.readyState === WebSocket.OPEN)) {
+                        generateRandomChallenge();
+                      }
+                    }, 3000);
                   }
-                } else if (dy > centerTolerance) {
-                  if (cy > vh / 2) {
-                    setGuide({ level: "warn", message: "Mova-se para cima", reason: "face_down" });
-                  } else {
-                    setGuide({ level: "warn", message: "Mova-se para baixo", reason: "face_up" });
-                  }
-                } else {
-                  setGuide({ level: "ok", message: "Posição perfeita!", reason: "centered" });
                 }
               }
+              
+              console.log("🔍 MediaPipe detectou face:", { present, box, landmarks: !!landmarksRef.current });
+            } else {
+              console.log("🔍 MediaPipe: nenhuma face detectada");
+              landmarksRef.current = null;
             }
             
+            setFacePresent(present);
+            setFaceBox(box);
 
           } catch (e) {
             console.warn("Erro na detecção facial:", e);
           }
         } else {
-          console.log("🚫 MediaPipe detector não disponível:", { 
+          console.log("🚫 MediaPipe não disponível:", { 
             detector: !!mpDetectorRef.current, 
+            landmarker: !!mpLandmarkerRef.current,
             vision: !!mpVisionRef.current 
           });
           setFacePresent(undefined);
           setFaceBox(undefined);
-          if (enablePositionGuide) {
-            setGuide({ level: "warn", message: "Detector facial não disponível - continue", reason: "no_detector" });
-          }
+          landmarksRef.current = null;
         }
       }
 
@@ -414,11 +581,19 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
         reader.readAsArrayBuffer(blob);
       }, "image/jpeg", 0.7);
     }
-  }, [enableClientHeuristics, maxFps, minMotionScore, phashIntervalFrames, send, targetFps, detectionIntervalFrames, bypassValidation]);
+  }, [enableClientHeuristics, maxFps, minMotionScore, phashIntervalFrames, send, targetFps, detectionIntervalFrames, bypassValidation, enableLivenessChallenge, currentChallenge, challengeCompleted, analyzeGesture, log, generateRandomChallenge, challengeStartTime, standaloneMode]);
 
   const start = useCallback(async () => {
     setError(undefined);
     setStatus("connecting");
+    
+    log('info', '🚀 Iniciando sistema', { 
+      sessionId: sessionId || 'vazio', 
+      token: token || 'vazio',
+      backendUrl: backendUrl || 'vazio',
+      enableLivenessChallenge,
+      bypassValidation 
+    });
 
     try {
       const defaultConstraints: MediaStreamConstraints = {
@@ -433,7 +608,25 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
       const ms = await navigator.mediaDevices.getUserMedia(defaultConstraints);
       mediaStreamRef.current = ms;
       const video = document.querySelector("video[data-proof-of-life]") as HTMLVideoElement | null;
-      if (video) video.srcObject = ms;
+      if (video) {
+        video.srcObject = ms;
+        
+        // Aguardar o vídeo estar pronto
+        await new Promise<void>((resolve) => {
+          const onLoadedMetadata = () => {
+            video.removeEventListener('loadedmetadata', onLoadedMetadata);
+            log('info', `📹 Vídeo carregado: ${video.videoWidth}x${video.videoHeight}`);
+            resolve();
+          };
+          
+          if (video.videoWidth > 0 && video.videoHeight > 0) {
+            log('info', `📹 Vídeo já carregado: ${video.videoWidth}x${video.videoHeight}`);
+            resolve();
+          } else {
+            video.addEventListener('loadedmetadata', onLoadedMetadata);
+          }
+        });
+      }
       if (!bypassValidation) {
         try {
           await (async () => {
@@ -467,12 +660,79 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
             }
             
             mpDetectorRef.current = detector;
+
+            // Inicializar Face Landmarker
+            const landmarkModelPaths = [
+              "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+              "https://storage.googleapis.com/mediapipe-assets/face_landmarker.task"
+            ];
+            
+            let landmarker = null;
+            for (const landmarkPath of landmarkModelPaths) {
+              try {
+                landmarker = await mod.FaceLandmarker.createFromOptions(fileset, {
+                  baseOptions: { modelAssetPath: landmarkPath },
+                  runningMode: "VIDEO",
+                  numFaces: 1
+                });
+                break;
+              } catch (e) {
+                console.warn(`Falha ao carregar modelo de landmarks de ${landmarkPath}:`, e);
+              }
+            }
+            
+            if (!landmarker) {
+              console.warn("❌ Nenhum modelo de Face Landmarks pôde ser carregado. Análise de gestos será desabilitada.");
+            } else {
+              console.log("✅ MediaPipe Face Landmarker carregado com sucesso!");
+            }
+            
+            mpLandmarkerRef.current = landmarker;
+            
+            // Se temos MediaPipe carregado e não tem backend configurado, iniciar modo standalone
+            const hasNoBackend = !sessionId || sessionId === "" || !token || token === "";
+            log('info', '🎯 Verificando condições para modo standalone', { 
+              sessionId: sessionId || 'vazio', 
+              token: token || 'vazio',
+              hasDetector: !!detector,
+              hasLandmarker: !!landmarker,
+              enableLivenessChallenge,
+              hasNoBackend
+            });
+            
+            if (detector && landmarker && enableLivenessChallenge && hasNoBackend) {
+              log('info', '🎯 Iniciando modo standalone - sem backend configurado');
+              setTimeout(() => {
+                startStandaloneMode();
+              }, 500);
+              return; // Não executar o resto da lógica de preparação
+            }
           })();
         } catch (e) {
           console.warn("Erro ao inicializar MediaPipe:", e);
+          
+          // Fallback: se MediaPipe falhar e não tem backend, iniciar modo standalone mesmo assim
+          const hasNoBackend = !sessionId || sessionId === "" || !token || token === "";
+          if (enableLivenessChallenge && hasNoBackend) {
+            log('info', '🎯 MediaPipe falhou, mas iniciando modo standalone para demonstração');
+            setTimeout(() => {
+              startStandaloneMode();
+            }, 1000);
+            return;
+          }
         }
       } else {
         log('info', "🔄 Modo bypass ativado - MediaPipe desabilitado");
+        
+        // Se está em bypass e não tem backend, ainda pode fazer demonstração
+        const hasNoBackend = !sessionId || sessionId === "" || !token || token === "";
+        if (enableLivenessChallenge && hasNoBackend) {
+          log('info', '🎯 Modo bypass + standalone - iniciando demonstração');
+          setTimeout(() => {
+            startStandaloneMode();
+          }, 1000);
+          return;
+        }
       }
 
       preparingRef.current = true;
@@ -485,22 +745,14 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
         const vh = v?.videoHeight || 240;
         let okNow = false;
         
-        if (mpDetectorRef.current && facePresent && faceBox) {
-          const area = faceBox.width * faceBox.height;
-          const areaRatio = area / (vw * vh);
-          const cx = faceBox.x + faceBox.width / 2;
-          const cy = faceBox.y + faceBox.height / 2;
-          const dx = Math.abs(cx - vw / 2) / vw;
-          const dy = Math.abs(cy - vh / 2) / vh;
-          okNow = areaRatio >= minFaceAreaRatio && areaRatio <= maxFaceAreaRatio && Math.max(dx, dy) <= centerTolerance;
-          
-          if (okNow) {
-            readyCountRef.current += 1;
-          } else {
-            readyCountRef.current = 0;
-          }
-        } else {
+        // Simplificado: apenas detectar face para estar pronto
+        if (mpDetectorRef.current && facePresent) {
           readyCountRef.current += 1;
+        } else if (!mpDetectorRef.current) {
+          // Se não há detector, ainda assim prosseguir
+          readyCountRef.current += 1;
+        } else {
+          readyCountRef.current = 0;
         }
         
         const requiredReadyFrames = bypassValidation ? 2 : (mpDetectorRef.current ? 12 : 5);
@@ -524,6 +776,26 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
                 setStatus("streaming");
                 preparingRef.current = false;
                 streamingRef.current = true;
+                
+                // Gerar primeiro desafio após 2 segundos de streaming
+                log('info', '🎯 Verificando se deve gerar desafio', { 
+                  enableLivenessChallenge, 
+                  bypassValidation, 
+                  shouldGenerate: enableLivenessChallenge && !bypassValidation 
+                });
+                
+                if (enableLivenessChallenge && !bypassValidation) {
+                  setTimeout(() => {
+                    log('info', '🎯 Tentando gerar primeiro desafio', { 
+                      streaming: streamingRef.current, 
+                      currentChallenge: !!currentChallenge 
+                    });
+                    if (streamingRef.current && !currentChallenge) {
+                      generateRandomChallenge();
+                    }
+                  }, 2000);
+                }
+                
                 const loop = () => {
                   const wso = wsRef.current;
                   if (!streamingRef.current || !wso || wso.readyState !== WebSocket.OPEN) return;
@@ -594,7 +866,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
       streamingRef.current = false;
       return;
     }
-  }, [wsUrl, send, sessionId, token, videoConstraints, captureAndSendFrame, bypassValidation]);
+  }, [wsUrl, send, sessionId, token, videoConstraints, captureAndSendFrame, bypassValidation, enableLivenessChallenge, currentChallenge, generateRandomChallenge, startStandaloneMode]);
 
   const stop = useCallback(async () => {
     wsRef.current?.close();
@@ -604,7 +876,7 @@ export function useProofOfLife(opts: UseProofOfLifeOptions): UseProofOfLifeResul
     setStatus("idle");
   }, []);
 
-  return { status, start, stop, lastPrompt, error, rttMs, targetFps, throttled, lastAckAt, facePresent, faceBox, guide };
+  return { status, start, stop, lastPrompt, error, rttMs, targetFps, throttled, lastAckAt, facePresent, faceBox, currentChallenge, challengeCompleted, standaloneMode, challengeStartTime };
 }
 
 

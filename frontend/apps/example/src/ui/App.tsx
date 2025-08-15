@@ -18,6 +18,7 @@ export function App() {
   const [bypassValidation, setBypassValidation] = useState(false);
   const [debugMode, setDebugMode] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [standaloneMode, setStandaloneMode] = useState(false);
   const logIdRef = React.useRef(0);
 
   const addLog = React.useCallback((level: 'info' | 'warn' | 'error', message: string, data?: any) => {
@@ -97,18 +98,52 @@ export function App() {
           <button onClick={() => setShow(true)} disabled={!backendUrl || !sessionId || !token}>Start</button>
           <button onClick={() => setShow(false)} className="ghost">Stop</button>
         </div>
+        <div className="row" style={{ marginTop: "10px" }}>
+          <button 
+            onClick={() => {
+              setStandaloneMode(true);
+              setShow(true);
+            }} 
+            style={{ 
+              backgroundColor: "#3b82f6", 
+              color: "white", 
+              border: "none", 
+              padding: "8px 16px", 
+              borderRadius: "4px",
+              cursor: "pointer"
+            }}
+          >
+            🧪 Teste Standalone (sem backend)
+          </button>
+          {standaloneMode && (
+            <button 
+              onClick={() => {
+                setStandaloneMode(false);
+                setShow(false);
+              }} 
+              className="ghost"
+              style={{ marginLeft: "8px" }}
+            >
+              Parar Teste
+            </button>
+          )}
+        </div>
+        <p className="muted" style={{marginTop: "10px", fontSize: "12px"}}>
+          💡 <strong>Modo Standalone:</strong> Clique no botão azul para testar apenas a detecção de gestos com MediaPipe, sem precisar de backend. 
+          Os desafios aparecerão automaticamente: olhar direita ➡️, esquerda ⬅️, cima ⬆️ e abrir boca 😮.
+        </p>
       </div>
 
       {show && (
         <div className="card">
           <ProofOfLife 
-            backendUrl={backendUrl} 
-            sessionId={sessionId} 
-            token={token} 
+            backendUrl={standaloneMode ? "" : backendUrl} 
+            sessionId={standaloneMode ? "" : sessionId} 
+            token={standaloneMode ? "" : token} 
             debug={debugMode} 
-            enablePositionGuide={!bypassValidation}
+            enableLivenessChallenge={standaloneMode || !bypassValidation}
             enableClientHeuristics={!bypassValidation}
-            bypassValidation={bypassValidation}
+            bypassValidation={!standaloneMode && bypassValidation}
             onLog={addLog}
           />
         </div>
