@@ -293,6 +293,7 @@ async fn config(State(state): State<AppState>) -> impl IntoResponse {
 async fn create_session(State(state): State<AppState>) -> impl IntoResponse {
     let session_id = uuid::Uuid::new_v4().to_string();
     let token = uuid::Uuid::new_v4().to_string();
+    let current_attempt_id = uuid::Uuid::new_v4().to_string();
     let session = Session {
         id: session_id.clone(),
         token: token.clone(),
@@ -301,11 +302,12 @@ async fn create_session(State(state): State<AppState>) -> impl IntoResponse {
         pad_state: pad::PadState::default(),
         tele: TelemetryState::default(),
         challenge_buffer: None,
-        current_attempt_id: uuid::Uuid::new_v4().to_string(),
+        current_attempt_id: current_attempt_id.clone(),
     };
     {
         let mut sessions = state.sessions.write().await;
         sessions.insert(session_id.clone(), session);
+        println!("🆕 [SESSION] Nova sessão criada: {} [attempt:{}]", session_id, current_attempt_id);
     }
     let body = CreateSessionResponse {
         session_id,
@@ -413,8 +415,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
                                 // Debug: mostrar estado atual periodicamente
                                 if s.tele.motion_hits % 10 == 0 {
-                                    println!("🔍 Debug: motion_hits={}, motion_scores={}, face_positions={}", 
-                                        s.tele.motion_hits, s.tele.motion_scores.len(), s.tele.face_positions.len());
+                                    println!("🔍 Debug: [session:{}] [attempt:{}] motion_hits={}, motion_scores={}, face_positions={}", 
+                                        s.id, s.current_attempt_id, s.tele.motion_hits, s.tele.motion_scores.len(), s.tele.face_positions.len());
                                 }
 
                                 // FSM: validar automaticamente desafios simples quando recebemos sinais suficientes
@@ -452,13 +454,13 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                         };
                                         if ok {
                                             s.fsm.completed += 1;
-                                            println!("✅ Desafio {} ({:?}) concluído! ({}/3) - motion_hits: {}", 
-                                                challenge_id, kind, s.fsm.completed, s.tele.motion_hits);
+                                            println!("✅ [session:{}] [attempt:{}] Desafio {} ({:?}) concluído! ({}/3) - motion_hits: {}", 
+                                                s.id, s.current_attempt_id, challenge_id, kind, s.fsm.completed, s.tele.motion_hits);
                                             s.tele.reset();
                                             if s.fsm.completed >= 3 {
                                                 s.fsm.state = FsmState::Passed;
                                                 done = true;
-                                                println!("🎉 Todos os 3 desafios concluídos! Proof of life PASSED");
+                                                println!("🎉 [session:{}] [attempt:{}] Todos os 3 desafios concluídos! Proof of life PASSED", s.id, s.current_attempt_id);
                                             } else {
                                                 let next_kind = {
                                                     use rand::seq::SliceRandom;
@@ -472,7 +474,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                                     let next_id = format!("c{}", s.fsm.completed + 1);
                                                     let aid = s.current_attempt_id.clone();
                                                     let next = ServerMessage::Prompt { challenge: protocol::PromptChallenge { id: &next_id, kind: nk.clone(), timeout_ms: 5000, attempt_id: &aid } };
-                                                    println!("🎯 Enviando próximo desafio: {:?} ({})", nk, next_id);
+                                                    println!("🎯 [session:{}] [attempt:{}] Enviando próximo desafio: {:?} ({})", s.id, s.current_attempt_id, nk, next_id);
                                                     let _ = socket.send(Message::Text(serde_json::to_string(&next).unwrap())).await;
                                                     *kind = nk;
                                                     *challenge_id = next_id;
@@ -493,16 +495,16 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                             }
                         }
                         ClientMessage::ChallengeStart(challenge_start) => {
-                            println!("📦 [BUFFER] Iniciando desafio: {} ({})", challenge_start.challenge_id, challenge_start.challenge_type);
-                            
                             let mut sessions = state.sessions.write().await;
                             if let Some(s) = sessions.values_mut().next() {
+                                println!("📦 [BUFFER] [session:{}] [attempt:{}] Iniciando desafio: {} ({})", s.id, s.current_attempt_id, challenge_start.challenge_id, challenge_start.challenge_type);
+                                
                                 if s.current_attempt_id != challenge_start.attempt_id {
                                     s.current_attempt_id = challenge_start.attempt_id.clone();
                                     s.fsm = SessionFsm::new();
                                     s.tele.reset();
                                     s.challenge_buffer = None;
-                                    println!("🔄 [BUFFER] Novo attempt_id: {} - reiniciando estado", s.current_attempt_id);
+                                    println!("🔄 [BUFFER] [session:{}] [attempt:{}] Novo attempt_id: {} - reiniciando estado", s.id, s.current_attempt_id, s.current_attempt_id);
                                 }
                                 s.challenge_buffer = Some(ChallengeBufferState {
                                     attempt_id: challenge_start.attempt_id.clone(),
@@ -515,18 +517,18 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                     gesture_detected: challenge_start.gesture_detected,
                                 });
                                 
-                                println!("📦 [BUFFER] Buffer inicializado para desafio {} com {} frames esperados", 
-                                    challenge_start.challenge_id, challenge_start.total_frames);
+                                println!("📦 [BUFFER] [session:{}] [attempt:{}] Buffer inicializado para desafio {} com {} frames esperados", 
+                                    s.id, s.current_attempt_id, challenge_start.challenge_id, challenge_start.total_frames);
                             }
                         }
                         ClientMessage::ChallengeFrameBatch(frame_batch) => {
-                            println!("📦 [BUFFER] Recebendo lote {} de {} frames para desafio {}", 
-                                frame_batch.batch_index, frame_batch.frames.len(), frame_batch.challenge_id);
-                            
                             let mut sessions = state.sessions.write().await;
                             if let Some(s) = sessions.values_mut().next() {
+                                println!("📦 [BUFFER] [session:{}] [attempt:{}] Recebendo lote {} de {} frames para desafio {}", 
+                                    s.id, s.current_attempt_id, frame_batch.batch_index, frame_batch.frames.len(), frame_batch.challenge_id);
+                                
                                 if s.current_attempt_id != frame_batch.attempt_id {
-                                    println!("⚠️ [BUFFER] attempt_id não corresponde: esperado {}, recebido {} — ignorando lote", s.current_attempt_id, frame_batch.attempt_id);
+                                    println!("⚠️ [BUFFER] [session:{}] [attempt:{}] attempt_id não corresponde: esperado {}, recebido {} — ignorando lote", s.id, s.current_attempt_id, s.current_attempt_id, frame_batch.attempt_id);
                                     continue;
                                 }
                                 if let Some(ref mut buffer) = s.challenge_buffer {
@@ -534,22 +536,22 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                         buffer.frames.extend(frame_batch.frames);
                                         buffer.received_batches += 1;
                                         
-                                        println!("📦 [BUFFER] Buffer atualizado: {} frames recebidos em {} lotes", 
-                                            buffer.frames.len(), buffer.received_batches);
+                                        println!("📦 [BUFFER] [session:{}] [attempt:{}] Buffer atualizado: {} frames recebidos em {} lotes", 
+                                            s.id, s.current_attempt_id, buffer.frames.len(), buffer.received_batches);
                                     } else {
-                                        println!("⚠️ [BUFFER] IDs não correspondem: attempt {} vs {}, desafio {} vs {}", 
-                                            buffer.attempt_id, frame_batch.attempt_id, buffer.challenge_id, frame_batch.challenge_id);
+                                        println!("⚠️ [BUFFER] [session:{}] [attempt:{}] IDs não correspondem: attempt {} vs {}, desafio {} vs {}", 
+                                            s.id, s.current_attempt_id, buffer.attempt_id, frame_batch.attempt_id, buffer.challenge_id, frame_batch.challenge_id);
                                     }
                                 } else {
-                                    println!("⚠️ [BUFFER] Nenhum buffer ativo para receber frames");
+                                    println!("⚠️ [BUFFER] [session:{}] [attempt:{}] Nenhum buffer ativo para receber frames", s.id, s.current_attempt_id);
                                 }
                             }
                         }
                         ClientMessage::ChallengeEnd(challenge_end) => {
-                            println!("📦 [BUFFER] Finalizando desafio: {}", challenge_end.challenge_id);
-                            
                             let mut sessions = state.sessions.write().await;
                             if let Some(s) = sessions.values_mut().next() {
+                                println!("📦 [BUFFER] [session:{}] [attempt:{}] Finalizando desafio: {}", s.id, s.current_attempt_id, challenge_end.challenge_id);
+                                
                                 if let Some(buffer) = s.challenge_buffer.take() {
                                     if s.current_attempt_id == challenge_end.attempt_id && buffer.attempt_id == challenge_end.attempt_id && buffer.challenge_id == challenge_end.challenge_id {
                                         // Analisar o buffer completo
@@ -568,19 +570,19 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                         
                                         if let Ok(result_json) = serde_json::to_string(&result) {
                                             let _ = socket.send(Message::Text(result_json)).await;
-                                            println!("📦 [BUFFER] Resultado enviado para desafio {}: {:?}", 
-                                                buffer.challenge_id, decision);
+                                            println!("📦 [BUFFER] [session:{}] [attempt:{}] Resultado enviado para desafio {}: {:?}", 
+                                                s.id, s.current_attempt_id, buffer.challenge_id, decision);
                                         }
                                         
                                         // Atualizar FSM e, se passar/falhar, seguir fluxo acumulativo
                                         if decision.passed {
                                             s.fsm.completed += 1;
-                                            println!("✅ [BUFFER] Desafio {} concluído! ({}/3)", 
-                                                buffer.challenge_id, s.fsm.completed);
+                                            println!("✅ [BUFFER] [session:{}] [attempt:{}] Desafio {} concluído! ({}/3)", 
+                                                s.id, s.current_attempt_id, buffer.challenge_id, s.fsm.completed);
                                             
                                             if s.fsm.completed >= 3 {
                                                 s.fsm.state = FsmState::Passed;
-                                                println!("🎉 [BUFFER] Todos os 3 desafios concluídos! Proof of life PASSED");
+                                                println!("🎉 [BUFFER] [session:{}] [attempt:{}] Todos os 3 desafios concluídos! Proof of life PASSED", s.id, s.current_attempt_id);
                                                 
                                                 let aid = s.current_attempt_id.clone();
                                                 let final_result = ServerMessage::Result { 
@@ -604,7 +606,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                             }
                                         } else {
                                             s.fsm.failed += 1;
-                                            println!("❌ [BUFFER] Desafio {} falhou! fails={} completes={}", buffer.challenge_id, s.fsm.failed, s.fsm.completed);
+                                            println!("❌ [BUFFER] [session:{}] [attempt:{}] Desafio {} falhou! fails={} completes={}", s.id, s.current_attempt_id, buffer.challenge_id, s.fsm.failed, s.fsm.completed);
                                             // Mesmo com falha, dispare próximo se ainda faltam desafios
                                             if s.fsm.completed + s.fsm.failed < 3 {
                                                 let mut all = vec![ChallengeKind::OpenMouth, ChallengeKind::TurnLeft, ChallengeKind::TurnRight, ChallengeKind::HeadUp];
@@ -632,11 +634,11 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                             }
                                         }
                                     } else {
-                                        println!("⚠️ [BUFFER] IDs não correspondem no fim: attempt {} vs {}, desafio {} vs {}", 
-                                            buffer.attempt_id, challenge_end.attempt_id, buffer.challenge_id, challenge_end.challenge_id);
+                                        println!("⚠️ [BUFFER] [session:{}] [attempt:{}] IDs não correspondem no fim: attempt {} vs {}, desafio {} vs {}", 
+                                            s.id, s.current_attempt_id, buffer.attempt_id, challenge_end.attempt_id, buffer.challenge_id, challenge_end.challenge_id);
                                     }
                                 } else {
-                                    println!("⚠️ [BUFFER] Nenhum buffer ativo para finalizar");
+                                    println!("⚠️ [BUFFER] [session:{}] [attempt:{}] Nenhum buffer ativo para finalizar", s.id, s.current_attempt_id);
                                 }
                             }
                         }
@@ -647,7 +649,10 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                     let throttle = ServerMessage::Throttle { reason: "fps-limit", max_fps };
                                     let _ = socket.send(Message::Text(serde_json::to_string(&throttle).unwrap())).await;
                                     let mut sessions = state.sessions.write().await;
-                                    if let Some(s) = sessions.values_mut().next() { s.metrics.throttled += 1; }
+                                    if let Some(s) = sessions.values_mut().next() { 
+                                        s.metrics.throttled += 1; 
+                                        println!("🚫 [THROTTLE] [session:{}] [attempt:{}] Frame throttled - fps limit exceeded", s.id, s.current_attempt_id);
+                                    }
                                     continue;
                                 }
                             }
